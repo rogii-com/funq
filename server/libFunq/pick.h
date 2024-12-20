@@ -38,6 +38,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QEvent>
 #include <QObject>
 #include <QTextStream>
+#include <QFile>
 
 class PickHandler {
 public:
@@ -54,6 +55,7 @@ public:
     inline void setShowProperties(bool show) { m_showProperties = show; }
 
 private:
+    QFile m_pickLog;
     QTextStream m_stream;
     bool m_showProperties;
 };
