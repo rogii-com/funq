@@ -78,10 +78,10 @@ class Runner(object):
         parser.add_argument('command', nargs=argparse.REMAINDER)
         return parser.parse_args(argv)
 
-    def _find_library(self):
-        this_dir = os.path.dirname(os.path.realpath(__file__))
+    def _find_library(self, executable_path):
+        this_dir = os.path.dirname(executable_path)
         if self.system == 'Windows':
-            library_name = 'libFunq.dll'
+            library_name = 'Funq.dll'
         elif self.system == 'Darwin':
             library_name = 'libFunq.dylib'
         else:
@@ -108,7 +108,7 @@ class Runner(object):
         if opts.host is not None:
             env['FUNQ_HOST'] = str(opts.host)
 
-        library_path = self._find_library()
+        library_path = self._find_library(opts.command[0])
         if not os.path.isfile(library_path):
             raise RuntimeError("Unable to find funq library %r" % library_path)
 
