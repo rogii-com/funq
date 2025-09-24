@@ -37,6 +37,9 @@ endif()
 # Auto-include current directory
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
+set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_LIST_DIR}) 
+include(GNUInstallDirs)
+
 set(ROGII_FOLDER_PATH "${CMAKE_CURRENT_LIST_DIR}/rogii")
 if(EXISTS "${ROGII_FOLDER_PATH}/npm/Include.cmake")
   include(${ROGII_FOLDER_PATH}/npm/Include.cmake)
@@ -112,4 +115,14 @@ if(BUILD_TESTS)
   add_subdirectory(player_tester)
   add_subdirectory(tests/libFunq)
   add_subdirectory(tests/protocole)
+endif()
+
+if(EXISTS "${ROGII_FOLDER_PATH}/install_targets.cmake")
+  include(${ROGII_FOLDER_PATH}/install_targets.cmake)
+
+  get_all_targets(_all_targets ${CMAKE_CURRENT_SOURCE_DIR})
+  foreach(tgt IN LISTS _all_targets)
+    install_target_to_dir(${tgt} ${CMAKE_INSTALL_BINDIR})
+  endforeach()
+
 endif()
