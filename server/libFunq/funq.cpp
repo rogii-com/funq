@@ -43,6 +43,8 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QTcpSocket>
 #include <QTimer>
 
+#pragma warning(disable: 4996)
+
 #define DEFAUT_HOOQ_PORT 9999
 
 #ifdef Q_WS_WIN

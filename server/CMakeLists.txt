@@ -37,6 +37,23 @@ endif()
 # Auto-include current directory
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
+set(ROGII_FOLDER_PATH "${CMAKE_CURRENT_LIST_DIR}/rogii")
+if(EXISTS "${ROGII_FOLDER_PATH}/npm/Include.cmake")
+  include(${ROGII_FOLDER_PATH}/npm/Include.cmake)
+  include(${ROGII_FOLDER_PATH}/environment.cmake)
+
+  # Disable strict version checks for toolchain packages if present
+  set(MSVS_PACKAGE__DISABLE_VERSION_CHECK ON CACHE BOOL "" FORCE)
+  set(WINDOWSSDK_PACKAGE__DISABLE_VERSION_CHECK ON CACHE BOOL "" FORCE)
+
+  # Prepare packages from configured repositories
+  CNPM_PREPARE_PACKAGES(
+    DEFAULT_REPOSITORY_URLS "$ENV{CNPM_URLS}"
+  )
+
+  set(QT_MAJOR_VERSION 6)
+endif()
+
 # If Qt version is not explicitly specified, automatically determine it
 if(NOT QT_MAJOR_VERSION)
   find_package(Qt NAMES Qt5 Qt6 REQUIRED COMPONENTS Core)
@@ -54,7 +71,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Set common compile options
-add_compile_options(-Wall -Wextra -Wpedantic)
+if (MSVC)
+    add_compile_options(/WX)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
 if(BUILD_DISALLOW_WARNINGS)
   message(STATUS "Building with -Werror")
   add_compile_options(-Werror)
@@ -80,7 +102,7 @@ find_package(
   OPTIONAL_COMPONENTS Quick
 )
 set(QT_VERSION "${${QT}_VERSION}")
-set(WITH_QTQUICK "${${QT}Quick_FOUND}")
+set(WITH_QTQUICK FALSE)
 message(STATUS "Building with Qt ${QT_VERSION}")
 message(STATUS "QtQuick found: ${WITH_QTQUICK}")
 
