@@ -125,6 +125,7 @@ void Funq::active_hook_player(Funq::MODE mode) {
 
     Funq * hook = new Funq(mode, host, port);
 
+    QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, [](){unRegisterPick();});
     QObject::connect(QCoreApplication::instance(), SIGNAL(aboutToQuit()), hook,
                      SLOT(deleteLater()));
 }
