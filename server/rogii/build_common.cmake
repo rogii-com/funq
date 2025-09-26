@@ -166,6 +166,11 @@ set(
     ${ROOT}/${PACKAGE_NAME}
 )
 
+file(
+    MAKE_DIRECTORY
+    "${ROOT}"
+)
+
 set(
     GENERATOR
     -G "Ninja"
@@ -183,11 +188,12 @@ set(
 )
 
 set(FOLDERS_TO_ARCHIVE 
-    client
-    doc-dev
-    server
-    tests-functionnal
+    ../client
+    ../doc-dev
+    ../server
+    ../tests-functionnal
 )
+
 
 execute_process(
     COMMAND
@@ -219,7 +225,7 @@ execute_process(
     COMMAND
         "${CMAKE_COMMAND}" -E tar cf "funq-Debug.7z" --format=7zip -- ${FOLDERS_TO_ARCHIVE}
     WORKING_DIRECTORY
-        "${ROOT}/../"
+        "${ROOT}"
 )
 
 file(
@@ -267,7 +273,7 @@ execute_process(
     COMMAND
         "${CMAKE_COMMAND}" -E tar cf "funq-RelWithDebInfo.7z" --format=7zip --  ${FOLDERS_TO_ARCHIVE}
     WORKING_DIRECTORY
-        "${ROOT}/../"
+        "${ROOT}"
 )
 
 file(
