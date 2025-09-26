@@ -148,7 +148,7 @@ endif()
 
 set(
     PACKAGE_NAME
-    "proj-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${ARCH}-${BUILD_NUMBER}${TAG}"
+    "funq-${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_PATCH}-${ARCH}-${BUILD_NUMBER}${TAG}"
 )
 
 set(
@@ -182,6 +182,13 @@ set(
     OFF
 )
 
+set(FOLDERS_TO_ARCHIVE 
+    client
+    doc-dev
+    server
+    tests-functionnal
+)
+
 execute_process(
     COMMAND
         "${CMAKE_COMMAND}" ${GENERATOR} -DGIT_COMMIT=${GIT_COMMIT} -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=${CMAKE_INSTALL_PREFIX} -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DENABLE_TIFF=${ENABLE_TIFF_VALUE} -DENABLE_CURL=${ENABLE_CURL_VALUE} -DBUILD_PROJSYNC=OFF ${PROJECT_ROOT_PATH}
@@ -201,6 +208,23 @@ execute_process(
         "${CMAKE_COMMAND}" --build . --target install
     WORKING_DIRECTORY
         "${DEBUG_PATH}"
+)
+
+file(
+    REMOVE_RECURSE 
+    "${PROJECT_ROOT_PATH}/build/"
+)
+
+execute_process(
+    COMMAND
+        "${CMAKE_COMMAND}" -E tar cf "funq-Debug.7z" --format=7zip -- ${FOLDERS_TO_ARCHIVE}
+    WORKING_DIRECTORY
+        "${ROOT}/../"
+)
+
+file(
+    REMOVE_RECURSE 
+    "${PROJECT_ROOT_PATH}/bin/"
 )
 
 set(
@@ -234,18 +258,19 @@ execute_process(
         "${RELEASE_PATH}"
 )
 
-# Ensure package metadata is included
 file(
-    COPY
-        "${ROGII_FOLDER_PATH}/package.cmake"
-    DESTINATION
-        "${ROOT}/${PACKAGE_NAME}"
+    REMOVE_RECURSE 
+    "${PROJECT_ROOT_PATH}/build/"
 )
 
 execute_process(
     COMMAND
-        "${CMAKE_COMMAND}" -E tar cf "${PACKAGE_NAME}.7z" --format=7zip -- "${PACKAGE_NAME}"
+        "${CMAKE_COMMAND}" -E tar cf "funq-RelWithDebInfo.7z" --format=7zip --  ${FOLDERS_TO_ARCHIVE}
     WORKING_DIRECTORY
-        "${ROOT}"
+        "${ROOT}/../"
 )
 
+file(
+    REMOVE_RECURSE 
+    "${PROJECT_ROOT_PATH}/bin/"
+)
