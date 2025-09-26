@@ -67,7 +67,11 @@ bool Pick::handleEvent(QObject * receiver, QEvent * event) {
 }
 
 PickFormatter::PickFormatter()
-    : m_stream(stdout, QIODevice::WriteOnly), m_showProperties(true) {
+    : m_pickLog("pick_log.txt")
+    , m_stream(&m_pickLog)
+    , m_showProperties(true) {
+    if (!m_pickLog.open(QFile::WriteOnly | QFile::Truncate))
+        throw std::exception("");
 }
 
 void print_object_props(QObject * object, QTextStream & stream) {
@@ -104,4 +108,5 @@ void PickFormatter::handle(QObject * object, const QPoint & pos) {
     }
 
     m_stream.flush();
+    m_pickLog.flush();
 }

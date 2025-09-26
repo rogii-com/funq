@@ -1,0 +1,5 @@
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    include(${CMAKE_CURRENT_LIST_DIR}/environment_windows.cmake)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    include(${CMAKE_CURRENT_LIST_DIR}/environment_linux.cmake)
+endif()
