@@ -188,10 +188,8 @@ set(
 )
 
 set(FOLDERS_TO_ARCHIVE 
-    ../client
-    ../doc-dev
-    ../server
-    ../tests-functionnal
+    ../server/bin
+    ../server/funq_server
 )
 
 
@@ -221,16 +219,32 @@ file(
     "${PROJECT_ROOT_PATH}/build/"
 )
 
+file(
+    COPY
+        "${PROJECT_ROOT_PATH}/funq_server/"
+    DESTINATION 
+        "${CMAKE_INSTALL_PREFIX}/funq_server"
+)
+
+file(
+    COPY
+        "${PROJECT_ROOT_PATH}/bin/"
+        "${PROJECT_ROOT_PATH}/funq_server/runner.py"
+    DESTINATION 
+        "${CMAKE_INSTALL_PREFIX}"
+)
+
 execute_process(
     COMMAND
-        "${CMAKE_COMMAND}" -E tar cf "funq-Debug.7z" --format=7zip -- ${FOLDERS_TO_ARCHIVE}
+        "${CMAKE_COMMAND}" -E tar cf "../funq-Debug.7z" --format=7zip -- .
     WORKING_DIRECTORY
-        "${ROOT}"
+        "${CMAKE_INSTALL_PREFIX}"
 )
 
 file(
     REMOVE_RECURSE 
     "${PROJECT_ROOT_PATH}/bin/"
+    "${CMAKE_INSTALL_PREFIX}"
 )
 
 set(
@@ -269,14 +283,30 @@ file(
     "${PROJECT_ROOT_PATH}/build/"
 )
 
+file(
+    COPY
+        "${PROJECT_ROOT_PATH}/funq_server/"
+    DESTINATION 
+        "${CMAKE_INSTALL_PREFIX}/funq_server"
+)
+
+file(
+    COPY
+        "${PROJECT_ROOT_PATH}/bin/"
+        "${PROJECT_ROOT_PATH}/funq_server/runner.py"
+    DESTINATION 
+        "${CMAKE_INSTALL_PREFIX}"
+)
+
 execute_process(
     COMMAND
-        "${CMAKE_COMMAND}" -E tar cf "funq-RelWithDebInfo.7z" --format=7zip --  ${FOLDERS_TO_ARCHIVE}
+        "${CMAKE_COMMAND}" -E tar cf "../funq-RelWithDebInfo.7z" --format=7zip -- .
     WORKING_DIRECTORY
-        "${ROOT}"
+        "${CMAKE_INSTALL_PREFIX}"
 )
 
 file(
     REMOVE_RECURSE 
     "${PROJECT_ROOT_PATH}/bin/"
+    "${CMAKE_INSTALL_PREFIX}"
 )

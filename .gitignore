@@ -20,6 +20,7 @@ cmake_install.cmake
 CMakeLists.txt.user
 CMakeCache.txt
 
+!/**/rogii/build/
 *_autogen/
 CMakeFiles/
 server/bin

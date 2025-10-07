@@ -54,8 +54,8 @@ function(install_target_to_dir tgt dir)
                   EXECUTABLE \"$<TARGET_FILE:${tgt}>\"
                   GENERATE_QT_CONF
                   BIN_DIR \"${dir}\"
-                  PLUGINS_DIR \"./\${dir}/plugins\"
-                  DEPLOY_TOOL_OPTIONS --no-translations
+                  PLUGINS_DIR \"./\${dir}\"
+                  DEPLOY_TOOL_OPTIONS --no-translations --no-compiler-runtime
                 )
                 "
       )
