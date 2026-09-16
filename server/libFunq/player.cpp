@@ -68,7 +68,33 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QQuickWindow>
 #endif
 
+#ifdef QT_QUICKWIDGETS_LIB
+#include <QQuickWidget>
+#endif
+
 using namespace ObjectPath;
+
+#ifdef QT_QUICK_LIB
+/**
+ * Returns the window holding the QML scene of an object: the window itself, or
+ * the offscreen window of a QQuickWidget.
+ *
+ * The offscreen window of a QQuickWidget may be destroyed and recreated during
+ * the life time of the widget, so it is resolved on every call rather than
+ * handed out to clients to keep.
+ */
+static QQuickWindow * resolveQuickWindow(QObject * object) {
+    if (QQuickWindow * window = qobject_cast<QQuickWindow *>(object)) {
+        return window;
+    }
+#ifdef QT_QUICKWIDGETS_LIB
+    if (QQuickWidget * widget = qobject_cast<QQuickWidget *>(object)) {
+        return widget->quickWindow();
+    }
+#endif
+    return NULL;
+}
+#endif
 
 template <class T>
 void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
@@ -301,15 +327,23 @@ QtJson::JsonObject Player::widget_by_path(const QtJson::JsonObject & command) {
 QtJson::JsonObject Player::quick_item_find(const QtJson::JsonObject & command) {
     QtJson::JsonObject result;
 #ifdef QT_QUICK_LIB
-    WidgetLocatorContext<QQuickWindow> ctx(this, command, "quick_window_oid");
+    ObjectLocatorContext ctx(this, command, "quick_window_oid");
     if (ctx.hasError()) {
         return ctx.lastError;
     }
-    QQuickItem * item;
+    QQuickWindow * window = resolveQuickWindow(ctx.obj);
+    if (!window) {
+        return createError(
+            "NotAQuickWindow",
+            QString::fromUtf8(
+                "Object (id:%1) is neither a QQuickWindow nor a QQuickWidget")
+                .arg(ctx.id));
+    }
+    QQuickItem * item = NULL;
     qulonglong id;
     QString qid = command["qid"].toString();
     if (!qid.isEmpty()) {
-        item = ObjectPath::findQuickItemById(ctx.widget->contentItem(), qid);
+        item = ObjectPath::findQuickItemById(window->contentItem(), qid);
         id = registerObject(item);
         if (id == 0) {
             return createError(
@@ -318,7 +352,7 @@ QtJson::JsonObject Player::quick_item_find(const QtJson::JsonObject & command) {
         }
     } else {
         QString path = command["path"].toString();
-        item = ObjectPath::findQuickItem(ctx.widget, path);
+        item = ObjectPath::findQuickItem(window, path);
         id = registerObject(item);
         if (id == 0) {
             return createError(
