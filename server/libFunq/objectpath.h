@@ -49,6 +49,8 @@ namespace ObjectPath {
 QString objectPath(QObject * object);
 QString objectName(QObject * object);
 QObject * findObject(const QString & path);
+void watchTopLevelObjects();
+void registerTopLevelObjects();
 
 #ifdef QT_QUICK_LIB
 QString quickObjectName(QQuickItem * item);

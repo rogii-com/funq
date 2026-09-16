@@ -35,8 +35,11 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include "objectpath.h"
 
 #include <QApplication>
+#include <QCoreApplication>
+#include <QEvent>
 #include <QGraphicsItem>
 #include <QGraphicsView>
+#include <QHash>
 #include <QWidget>
 #include <QWindow>
 
@@ -59,6 +62,97 @@ inline QString _rawObjectName(QObject * object) {
     return rawName;
 }
 
+namespace {
+
+/**
+ * Remembers the order in which parentless objects were first seen.
+ *
+ * An object without a parent has no sibling list to be numbered in, so two of
+ * them sharing a name got the same path: one hid the other in a listing and a
+ * lookup returned whichever came first. Numbering them by first sight keeps a
+ * name stable for as long as the object lives, which the order of
+ * QApplication::topLevelWidgets() does not - it changes whenever a widget is
+ * created or destroyed.
+ */
+class ParentlessOrder : public QObject {
+public:
+    static ParentlessOrder * instance() {
+        static ParentlessOrder * order = new ParentlessOrder();
+        return order;
+    }
+
+    quint64 rankOf(QObject * object) {
+        QHash<QObject *, quint64>::const_iterator it = m_ranks.constFind(object);
+        if (it != m_ranks.constEnd()) {
+            return it.value();
+        }
+        const quint64 rank = ++m_lastRank;
+        m_ranks.insert(object, rank);
+        connect(object, &QObject::destroyed, this, &ParentlessOrder::forget);
+        return rank;
+    }
+
+    template <class T>
+    void registerAll(const QList<T *> & objects) {
+        foreach (T * object, objects) {
+            if (!object->parent()) {
+                rankOf(object);
+            }
+        }
+    }
+
+    /**
+     * Number of live parentless objects with the same raw name seen earlier.
+     */
+    int indexAmongNamesakes(QObject * object, const QString & rawName) {
+        const quint64 rank = rankOf(object);
+        int index = 0;
+        for (QHash<QObject *, quint64>::const_iterator it = m_ranks.constBegin();
+             it != m_ranks.constEnd(); ++it) {
+            QObject * other = it.key();
+            if (other != object && it.value() < rank && !other->parent() &&
+                _rawObjectName(other) == rawName) {
+                ++index;
+            }
+        }
+        return index;
+    }
+
+    void watch() {
+        if (!m_watching && qApp) {
+            qApp->installEventFilter(this);
+            m_watching = true;
+        }
+    }
+
+protected:
+    bool eventFilter(QObject * object, QEvent *) override {
+        // a widget or a window gets its first events right when it is created
+        if (!object->parent() &&
+            (object->isWidgetType() || object->isWindowType())) {
+            rankOf(object);
+        }
+        return false;
+    }
+
+private:
+    void forget(QObject * object) { m_ranks.remove(object); }
+
+    QHash<QObject *, quint64> m_ranks;
+    quint64 m_lastRank = 0;
+    bool m_watching = false;
+};
+
+}  // namespace
+
+void ObjectPath::watchTopLevelObjects() { ParentlessOrder::instance()->watch(); }
+
+void ObjectPath::registerTopLevelObjects() {
+    ParentlessOrder * order = ParentlessOrder::instance();
+    order->registerAll(QApplication::topLevelWidgets());
+    order->registerAll(QApplication::topLevelWindows());
+}
+
 /**
  * Returns the object name (unique given its siblings)
  */
@@ -66,7 +160,12 @@ QString rawObjectName(QObject * object) {
     QString rawName = _rawObjectName(object);
 
     if (!object->parent()) {
-        return rawName;
+        const int index =
+            ParentlessOrder::instance()->indexAmongNamesakes(object, rawName);
+        if (index == 0) {
+            return rawName;
+        }
+        return QString("%1-%2").arg(rawName).arg(index);
     }
 
     const QList<QObject *> siblings = object->parent()->children();
@@ -113,6 +212,7 @@ QObject * ObjectPath::findObject(const QString & path) {
     QObject * parent = 0;
     if (parts.isEmpty()) {
         // Top level widget
+        registerTopLevelObjects();
         Q_FOREACH (QWidget * widget, QApplication::topLevelWidgets()) {
             if (objectName(widget) == name) {
                 return widget;
