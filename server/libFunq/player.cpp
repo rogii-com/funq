@@ -117,23 +117,49 @@ void mouse_dclick(T * w, const QPoint & pos) {
 }
 
 #ifdef QT_QUICK_LIB
+#ifdef QT_QUICKWIDGETS_LIB
+/**
+ * Returns the QQuickWidget rendering a window, when the window is the
+ * offscreen window of one.
+ */
+static QQuickWidget * hostingQuickWidget(QQuickWindow * window) {
+    foreach (QWidget * widget, QApplication::allWidgets()) {
+        QQuickWidget * quickWidget = qobject_cast<QQuickWidget *>(widget);
+        if (quickWidget && quickWidget->quickWindow() == window) {
+            return quickWidget;
+        }
+    }
+    return NULL;
+}
+#endif
+
 /**
  * Posts a click into a QML scene.
  *
- * The window may be the offscreen window of a QQuickWidget, which has no
- * window on the screen, so the events are posted to the window object itself -
- * the way QQuickWidget forwards the events it receives. For the same reason
- * the global position is only as good as the position of that offscreen
- * window: an item that reads it will not see where the click really landed on
- * the screen.
+ * When a QQuickWidget renders the scene, the events go to that widget: this is
+ * the way real input reaches the scene, the widget maps the events into its
+ * offscreen window, and they carry the real position on screen - a popup that
+ * anchors itself to the click relies on it. A scene in a window of its own
+ * gets the events directly. A pointer moves in before it presses, which
+ * hover-driven items expect.
  */
 void quick_mouse_click(QQuickWindow * window, const QPoint & pos,
                        Qt::MouseButton button) {
-    const QPoint global_pos = window->mapToGlobal(pos);
-    qApp->postEvent(window,
+    QObject * receiver = window;
+    QPoint global_pos = window->mapToGlobal(pos);
+#ifdef QT_QUICKWIDGETS_LIB
+    if (QQuickWidget * widget = hostingQuickWidget(window)) {
+        receiver = widget;
+        global_pos = widget->mapToGlobal(pos);
+    }
+#endif
+    qApp->postEvent(receiver,
+                    new QMouseEvent(QEvent::MouseMove, pos, global_pos,
+                                    Qt::NoButton, Qt::NoButton, Qt::NoModifier));
+    qApp->postEvent(receiver,
                     new QMouseEvent(QEvent::MouseButtonPress, pos, global_pos,
                                     button, button, Qt::NoModifier));
-    qApp->postEvent(window,
+    qApp->postEvent(receiver,
                     new QMouseEvent(QEvent::MouseButtonRelease, pos, global_pos,
                                     button, Qt::NoButton, Qt::NoModifier));
 }
