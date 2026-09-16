@@ -488,6 +488,19 @@ void Player::_object_set_properties(QObject * object,
     }
 }
 
+#ifdef QT_QUICK_LIB
+void recursive_list_quick_item(QQuickItem * item, QtJson::JsonObject & out,
+                               bool with_properties) {
+    QtJson::JsonObject resultItems, resultItem;
+    dump_object(item, resultItem, with_properties);
+    foreach (QQuickItem * child, item->childItems()) {
+        recursive_list_quick_item(child, resultItems, with_properties);
+    }
+    resultItem["children"] = resultItems;
+    out[objectName(item)] = resultItem;
+}
+#endif
+
 void recursive_list_widget(QWidget * widget, QtJson::JsonObject & out,
                            bool with_properties) {
     QtJson::JsonObject resultWidgets, resultWidget;
@@ -498,6 +511,22 @@ void recursive_list_widget(QWidget * widget, QtJson::JsonObject & out,
             recursive_list_widget(subWidget, resultWidgets, with_properties);
         }
     }
+#ifdef QT_QUICKWIDGETS_LIB
+    // The QML scene of a QQuickWidget hangs off an offscreen window rather
+    // than off the widget, so walking children() never reaches it and the
+    // widget looks like a leaf. Listing the children of the content item
+    // matches what findQuickItem() expects a path to start with.
+    if (QQuickWidget * quickWidget = qobject_cast<QQuickWidget *>(widget)) {
+        QQuickWindow * window = quickWidget->quickWindow();
+        QQuickItem * content = window ? window->contentItem() : NULL;
+        if (content) {
+            foreach (QQuickItem * child, content->childItems()) {
+                recursive_list_quick_item(child, resultWidgets,
+                                          with_properties);
+            }
+        }
+    }
+#endif
     resultWidget["children"] = resultWidgets;
     out[objectName(widget)] = resultWidget;
 }
