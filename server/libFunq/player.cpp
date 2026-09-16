@@ -620,6 +620,32 @@ void recursive_list_quick_item(QQuickItem * item, QtJson::JsonObject & out,
 }
 #endif
 
+/**
+ * Lists the QML scene a widget renders, if it renders one.
+ *
+ * The scene of a QQuickWidget hangs off an offscreen window rather than off
+ * the widget, so walking children() never reaches it and the widget looks like
+ * a leaf. Listing the children of the content item matches what
+ * findQuickItem() expects a path to start with.
+ */
+void list_quick_scene(QWidget * widget, QtJson::JsonObject & out,
+                      bool with_properties) {
+#if defined(QT_QUICK_LIB) && defined(QT_QUICKWIDGETS_LIB)
+    QQuickWidget * quickWidget = qobject_cast<QQuickWidget *>(widget);
+    QQuickWindow * window = quickWidget ? quickWidget->quickWindow() : NULL;
+    QQuickItem * content = window ? window->contentItem() : NULL;
+    if (content) {
+        foreach (QQuickItem * child, content->childItems()) {
+            recursive_list_quick_item(child, out, with_properties);
+        }
+    }
+#else
+    Q_UNUSED(widget);
+    Q_UNUSED(out);
+    Q_UNUSED(with_properties);
+#endif
+}
+
 void recursive_list_widget(QWidget * widget, QtJson::JsonObject & out,
                            bool with_properties) {
     QtJson::JsonObject resultWidgets, resultWidget;
@@ -630,22 +656,7 @@ void recursive_list_widget(QWidget * widget, QtJson::JsonObject & out,
             recursive_list_widget(subWidget, resultWidgets, with_properties);
         }
     }
-#if defined(QT_QUICK_LIB) && defined(QT_QUICKWIDGETS_LIB)
-    // The QML scene of a QQuickWidget hangs off an offscreen window rather
-    // than off the widget, so walking children() never reaches it and the
-    // widget looks like a leaf. Listing the children of the content item
-    // matches what findQuickItem() expects a path to start with.
-    if (QQuickWidget * quickWidget = qobject_cast<QQuickWidget *>(widget)) {
-        QQuickWindow * window = quickWidget->quickWindow();
-        QQuickItem * content = window ? window->contentItem() : NULL;
-        if (content) {
-            foreach (QQuickItem * child, content->childItems()) {
-                recursive_list_quick_item(child, resultWidgets,
-                                          with_properties);
-            }
-        }
-    }
-#endif
+    list_quick_scene(widget, resultWidgets, with_properties);
     resultWidget["children"] = resultWidgets;
     out[objectName(widget)] = resultWidget;
 }
@@ -663,6 +674,12 @@ QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
             if (subWidget) {
                 recursive_list_widget(subWidget, result, with_properties);
             }
+        }
+        // the QML scene of the widget asked about, which is not among its
+        // children: without this, listing a QQuickWidget by its oid answers
+        // nothing while listing its parent shows the whole scene
+        if (QWidget * asked = qobject_cast<QWidget *>(ctx.obj)) {
+            list_quick_scene(asked, result, with_properties);
         }
     } else {
         registerTopLevelObjects();
