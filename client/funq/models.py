@@ -989,10 +989,13 @@ class QuickScene(object):
 
     def items_at(self, x, y, with_properties=False):
         """
-        Returns the items at a position of the scene, outermost first.
+        Returns the visible items containing a position of the scene: the
+        topmost branch first, every item followed by its descendants.
 
-        Nothing is clicked and nothing in the application changes, so this
-        also works on menus and popups that a click would close.
+        Every branch is followed, so an item covered by a mouse area spanning
+        the whole panel is reported too. Nothing is clicked and nothing in the
+        application changes, so this also works on menus and popups that a
+        click would close.
 
         :param x: position in the coordinates of the scene.
         :param y: position in the coordinates of the scene.

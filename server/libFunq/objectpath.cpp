@@ -291,19 +291,34 @@ QQuickItem * ObjectPath::findQuickItemById(QQuickItem * root,
     return NULL;
 }
 
+/**
+ * Collects the visible descendants of an item that contain a scene position.
+ *
+ * Every branch is followed, not only the topmost child at the point: a scene
+ * often has a mouse area spanning a whole panel above everything else, and
+ * following the topmost child alone would report that area and nothing of what
+ * lies under it. An invisible item hides its whole subtree, so it is skipped.
+ */
+static void collectQuickItemsAt(QQuickItem * parent, const QPointF & scenePos,
+                                QList<QQuickItem *> & items) {
+    const QList<QQuickItem *> children = parent->childItems();
+    // the last child paints on top, so it is reported first
+    for (int i = children.size() - 1; i >= 0; --i) {
+        QQuickItem * child = children.at(i);
+        if (!child->isVisible()) {
+            continue;
+        }
+        if (child->contains(child->mapFromScene(scenePos))) {
+            items << child;
+        }
+        collectQuickItemsAt(child, scenePos, items);
+    }
+}
+
 QList<QQuickItem *> ObjectPath::quickItemsAt(QQuickItem * root,
                                              const QPointF & scenePos) {
     QList<QQuickItem *> items;
-    QQuickItem * current = root;
-    while (current) {
-        const QPointF local = current->mapFromScene(scenePos);
-        QQuickItem * child = current->childAt(local.x(), local.y());
-        if (!child || child == current) {
-            break;
-        }
-        items << child;
-        current = child;
-    }
+    collectQuickItemsAt(root, scenePos, items);
     return items;
 }
 
