@@ -932,7 +932,15 @@ class QuickItem(Object):
     Represent a QQuickItem or derived.
 
     You can get a :class:`QuickItem` instance by using
-    :meth:`QuickWindow.item`.
+    :meth:`QuickScene.item` or :meth:`QuickScene.items_at`.
+
+    :var scene_rect: position and size of the item in the coordinates of the
+                     scene, as a dict with the keys x, y, width and height.
+                     A QML item has no position on screen of its own: add the
+                     global position of the widget or the window that renders
+                     the scene to get one. [type: dict]
+    :var quick_path: path of the item, relative to the scene. Can be passed
+                     back as the path of :meth:`QuickScene.item`. [type: str]
     """
 
     CPP_CLASS = "QQuickItem"
@@ -940,6 +948,11 @@ class QuickItem(Object):
     def click(self):
         """
         Click on the :class:`QuickItem`.
+
+        The click is posted to the scene, so it does not move the real cursor
+        and produces no hover state. When the scene belongs to a QQuickWidget,
+        the item also sees a global position taken from the offscreen window
+        rather than from the screen.
         """
         self.client.send_command(
             "quick_item_click",
@@ -947,7 +960,70 @@ class QuickItem(Object):
         )
 
 
-class QuickWindow(Widget):
+class QuickScene(object):
+    """
+    Access to the items of a QML scene, whether it is rendered by a
+    :class:`QuickWindow` or by a :class:`QuickWidget`.
+    """
+
+    def item(self, path=None, id=None):
+        """
+        Search for a :class:`funq.models.QuickItem` and returns it.
+
+        :param path: path of the item, relative to the scene (do not pass
+                     the full path)
+        :param id: id of the qml item, or its objectName. Ids of the delegates
+                   of a Repeater or a ListView are not unique, so an
+                   objectName is often the only stable way to name one.
+        """
+        if not (path or id):
+            raise TypeError("path or id must be defined")
+
+        data = self.client.send_command(
+            'quick_item_find',
+            quick_window_oid=self.oid,
+            path=path,
+            qid=id,
+        )
+        return Object.create(self.client, data)
+
+    def items_at(self, x, y, with_properties=False):
+        """
+        Returns the items at a position of the scene, outermost first.
+
+        Nothing is clicked and nothing in the application changes, so this
+        also works on menus and popups that a click would close.
+
+        :param x: position in the coordinates of the scene.
+        :param y: position in the coordinates of the scene.
+        :param with_properties: also read the properties of every item found.
+        """
+        data = self.client.send_command(
+            'quick_item_at',
+            quick_window_oid=self.oid,
+            x=x,
+            y=y,
+            with_properties=with_properties,
+        )
+        return [Object.create(self.client, item) for item in data['items']]
+
+
+class QuickWidget(Widget, QuickScene):
+    """
+    Represent a QQuickWidget, the widget that renders a QML scene inside an
+    application made of widgets.
+
+    The scene lives in an offscreen window which is not part of the widget
+    tree, so the widget itself is what you look up::
+
+      quick_widget = client.widget(path='MainWindow::...::MyQuickWidget')
+      label = quick_widget.item(id='wellNameLabel')
+    """
+
+    CPP_CLASS = "QQuickWidget"
+
+
+class QuickWindow(Widget, QuickScene):
     """
     Represent a QQuickWindow or QQuickView.
 
@@ -1020,10 +1096,4 @@ class QuickWindow(Widget):
             # object path from the root item.
             path = path[len(self.path)+2:]
 
-        data = self.client.send_command(
-            'quick_item_find',
-            quick_window_oid=self.oid,
-            path=path,
-            qid=id,
-        )
-        return Object.create(self.client, data)
+        return QuickScene.item(self, path=path, id=id)
