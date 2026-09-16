@@ -24,6 +24,9 @@
 
 #include <QColor>
 #include <QDateTime>
+#include <QPointF>
+#include <QRectF>
+#include <QSizeF>
 
 namespace QtJson {
 static QString dateFormat, dateTimeFormat;
@@ -90,6 +93,43 @@ QVariant parse(const QString & json, bool & success) {
     }
 }
 
+/**
+ * Describes a point, a size or a rectangle as a map.
+ *
+ * JSON has no shape of its own for them and the serializer used to give up on
+ * the whole answer, so a method returning a QRectF looked like a dropped
+ * connection. The keys are the ones a caller passes in.
+ */
+static bool geometryToMap(const QVariant & data, QVariantMap & map) {
+    switch (data.userType()) {
+        case QMetaType::QPoint:
+        case QMetaType::QPointF: {
+            const QPointF point = data.toPointF();
+            map["x"] = point.x();
+            map["y"] = point.y();
+            return true;
+        }
+        case QMetaType::QSize:
+        case QMetaType::QSizeF: {
+            const QSizeF size = data.toSizeF();
+            map["width"] = size.width();
+            map["height"] = size.height();
+            return true;
+        }
+        case QMetaType::QRect:
+        case QMetaType::QRectF: {
+            const QRectF rect = data.toRectF();
+            map["x"] = rect.x();
+            map["y"] = rect.y();
+            map["width"] = rect.width();
+            map["height"] = rect.height();
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 QByteArray serialize(const QVariant & data) {
     bool success = true;
     return serialize(data, success);
@@ -97,6 +137,7 @@ QByteArray serialize(const QVariant & data) {
 
 QByteArray serialize(const QVariant & data, bool & success) {
     QByteArray str;
+    QVariantMap geometry;
     success = true;
 
     if (!data.isValid()) {  // invalid or null?
@@ -119,6 +160,8 @@ QByteArray serialize(const QVariant & data, bool & success) {
         str = serializeMap<>(data.toHash(), success);
     } else if (data.type() == QVariant::Map) {  // variant is a map?
         str = serializeMap<>(data.toMap(), success);
+    } else if (geometryToMap(data, geometry)) {
+        str = serializeMap<>(geometry, success);
     } else if ((data.type() == QVariant::String) ||
                (data.type() ==
                 QVariant::ByteArray)) {  // a string or a byte array?

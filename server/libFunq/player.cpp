@@ -1819,6 +1819,87 @@ DelayedResponse * Player::drag_n_drop(const QtJson::JsonObject & command) {
     return new DragNDropResponse(this, command);
 }
 
+/**
+ * Reads the numbers of a geometry value out of what JSON can carry.
+ *
+ * A point, a size or a rectangle arrives either as a list of numbers or as a
+ * map with the usual keys.
+ */
+static bool geometry_numbers(const QVariant & value, const QStringList & keys,
+                             QList<qreal> & numbers) {
+    if (value.userType() == QMetaType::QVariantList) {
+        const QVariantList list = value.toList();
+        if (list.size() != keys.size()) {
+            return false;
+        }
+        foreach (const QVariant & number, list) {
+            if (!number.canConvert<qreal>()) {
+                return false;
+            }
+            numbers << number.toReal();
+        }
+        return true;
+    }
+    if (value.userType() == QMetaType::QVariantMap) {
+        const QVariantMap map = value.toMap();
+        foreach (const QString & key, keys) {
+            if (!map.contains(key) || !map.value(key).canConvert<qreal>()) {
+                return false;
+            }
+            numbers << map.value(key).toReal();
+        }
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Builds a point, a size or a rectangle from a list or a map.
+ *
+ * QVariant converts between none of these and what JSON carries, so a method
+ * taking a QPointF - or a QVariant holding one, the shape QML-facing code uses
+ * - would read an empty point out of the list it was given.
+ */
+static bool build_geometry(const QVariant & value, int typeId, QVariant & out) {
+    QList<qreal> n;
+    switch (typeId) {
+        case QMetaType::QPoint:
+        case QMetaType::QPointF:
+            if (!geometry_numbers(value, QStringList() << "x" << "y", n)) {
+                return false;
+            }
+            out = typeId == QMetaType::QPoint
+                      ? QVariant(QPoint(qRound(n.at(0)), qRound(n.at(1))))
+                      : QVariant(QPointF(n.at(0), n.at(1)));
+            return true;
+        case QMetaType::QSize:
+        case QMetaType::QSizeF:
+            if (!geometry_numbers(value, QStringList() << "width" << "height",
+                                  n)) {
+                return false;
+            }
+            out = typeId == QMetaType::QSize
+                      ? QVariant(QSize(qRound(n.at(0)), qRound(n.at(1))))
+                      : QVariant(QSizeF(n.at(0), n.at(1)));
+            return true;
+        case QMetaType::QRect:
+        case QMetaType::QRectF:
+            if (!geometry_numbers(value,
+                                  QStringList() << "x" << "y" << "width"
+                                                << "height",
+                                  n)) {
+                return false;
+            }
+            out = typeId == QMetaType::QRect
+                      ? QVariant(QRect(qRound(n.at(0)), qRound(n.at(1)),
+                                       qRound(n.at(2)), qRound(n.at(3))))
+                      : QVariant(QRectF(n.at(0), n.at(1), n.at(2), n.at(3)));
+            return true;
+        default:
+            return false;
+    }
+}
+
 QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
     // any QObject will do: a QML item exposes its methods the same way a
     // widget exposes its slots, and forceActiveFocus() or selectAll() on a
@@ -1852,6 +1933,31 @@ QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
             QString::fromUtf8("At most %1 arguments can be passed to %2")
                 .arg(gMaxInvokeArguments)
                 .arg(slot_name));
+    }
+
+    // A method declared as taking a QVariant - what QML-facing code does -
+    // accepts anything, so nothing says that a pair of numbers meant a point.
+    // `param_types` lets the caller name the type each argument must hold.
+    const QVariantList wantedTypes = command["param_types"].toList();
+    for (int i = 0; i < givenArguments.size() && i < wantedTypes.size(); ++i) {
+        const QByteArray name = wantedTypes.at(i).toString().toLatin1();
+        const QMetaType type = QMetaType::fromName(name.constData());
+        if (!type.isValid()) {
+            return createError("NoMethodInvoked",
+                               QString::fromUtf8("Unknown type `%1`")
+                                   .arg(QString::fromLatin1(name)));
+        }
+        QVariant built;
+        if (build_geometry(givenArguments.at(i), type.id(), built)) {
+            givenArguments[i] = built;
+        } else if (!givenArguments[i].convert(type)) {
+            return createError(
+                "NoMethodInvoked",
+                QString::fromUtf8("Argument %1 of %2 does not convert to %3")
+                    .arg(i)
+                    .arg(slot_name)
+                    .arg(QString::fromLatin1(name)));
+        }
     }
 
     const QMetaObject * metaObject = ctx.obj->metaObject();
@@ -1893,12 +1999,18 @@ QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
     const bool returnsVariant = chosen.returnType() == QMetaType::QVariant;
     QVariantList arguments;
     if (rank == 3) {
-        arguments << params;
+        // an invalid QVariant is what a caller that gave nothing meant
+        arguments << (givenArguments.isEmpty() ? params : givenArguments.at(0));
     } else if (rank >= 1) {
         arguments = givenArguments;
         for (int i = 0; i < arguments.size(); ++i) {
             const int parameterType = chosen.parameterType(i);
             if (parameterType == QMetaType::QVariant) {
+                continue;
+            }
+            QVariant built;
+            if (build_geometry(arguments.at(i), parameterType, built)) {
+                arguments[i] = built;
                 continue;
             }
 #if QT_VERSION_MAJOR >= 6
@@ -1930,7 +2042,16 @@ QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
 #else
         const char * typeName = QMetaType::typeName(parameterType);
 #endif
-        generic[i] = QGenericArgument(typeName, arguments.at(i).constData());
+        // A parameter declared as QVariant wants the address of the variant,
+        // not of the value inside it. The two coincide while the value fits in
+        // the variant's own storage, which is why passing the contents used to
+        // work: a QPointF fits, a QRectF does not and the callee then read a
+        // variant out of the payload.
+        const void * data =
+            parameterType == QMetaType::QVariant
+                ? static_cast<const void *>(&arguments.at(i))
+                : arguments.at(i).constData();
+        generic[i] = QGenericArgument(typeName, data);
     }
 
     bool invokedMeth;
