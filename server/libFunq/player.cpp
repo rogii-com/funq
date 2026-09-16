@@ -176,6 +176,10 @@ void dump_object(QObject * object, QtJson::JsonObject & out,
         // A QML item has no position on screen of its own. The client turns
         // this rect into screen coordinates with the global position of the
         // widget or the window that renders the scene.
+        // "path" walks object parents and stops at the offscreen window, so
+        // it cannot be fed back to a lookup. This one is what quick_item_find
+        // takes as a path.
+        out["quick_path"] = quickItemPath(item);
         const QPointF topLeft = item->mapToScene(QPointF(0, 0));
         QtJson::JsonObject sceneRect;
         sceneRect["x"] = topLeft.x();
@@ -552,7 +556,7 @@ void recursive_list_quick_item(QQuickItem * item, QtJson::JsonObject & out,
         recursive_list_quick_item(child, resultItems, with_properties);
     }
     resultItem["children"] = resultItems;
-    out[objectName(item)] = resultItem;
+    out[quickObjectName(item)] = resultItem;
 }
 #endif
 

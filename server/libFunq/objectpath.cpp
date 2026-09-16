@@ -158,11 +158,42 @@ QGraphicsItem * ObjectPath::graphicsItemFromId(QGraphicsView * view,
 /* quick items stuff */
 
 #ifdef QT_QUICK_LIB
+/**
+ * Returns the item name, unique among its visual siblings.
+ *
+ * Items are addressed by their place in the item tree, and that tree is made
+ * of childItems(), not of object children: a QML item usually has its scope
+ * object as object parent, so numbering it among its object siblings would
+ * disagree with the path it is reached by.
+ */
+QString ObjectPath::quickObjectName(QQuickItem * item) {
+    QString name = _rawObjectName(item);
+    QQuickItem * parent = item->parentItem();
+    if (parent) {
+        int index = 0;
+        foreach (QQuickItem * sibling, parent->childItems()) {
+            if (sibling == item) {
+                break;
+            }
+            if (_rawObjectName(sibling) == name) {
+                ++index;
+            }
+        }
+        if (index > 0) {
+            name = QString("%1-%2").arg(name).arg(index);
+        }
+    }
+    name.replace("::", ":_:");  // we use :: as path separators
+    return name;
+}
+
 QString ObjectPath::quickItemPath(QQuickItem * item) {
     QStringList components;
     QQuickItem * current = item;
-    while (current) {
-        components.prepend(ObjectPath::objectName(current));
+    // the topmost item is the content item of the window, and a path is
+    // relative to it
+    while (current && current->parentItem()) {
+        components.prepend(quickObjectName(current));
         current = current->parentItem();
     }
     return components.join("::");
@@ -182,7 +213,7 @@ QQuickItem * ObjectPath::findQuickItem(QQuickWindow * window,
         lstpath.removeFirst();
         bool find = false;
         foreach (QQuickItem * child, root->childItems()) {
-            if (ObjectPath::objectName(child) == itemName) {
+            if (ObjectPath::quickObjectName(child) == itemName) {
                 find = true;
                 root = child;
                 break;
