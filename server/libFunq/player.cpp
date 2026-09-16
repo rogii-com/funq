@@ -78,6 +78,10 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 using namespace ObjectPath;
 
+// Qt's invokeMethod takes a fixed number of arguments; four covers the
+// signals and slots a test drives, such as toggled(itemId, checked).
+static const int gMaxInvokeArguments = 4;
+
 #ifdef QT_QUICK_LIB
 /**
  * Returns the window holding the QML scene of an object: the window itself, or
@@ -661,6 +665,7 @@ QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
             }
         }
     } else {
+        registerTopLevelObjects();
         QList<QWidget *> widgets = QApplication::topLevelWidgets();
         if (!widgets.isEmpty()) {
             foreach (QWidget * widget, widgets) {
@@ -736,7 +741,20 @@ QtJson::JsonObject Player::quick_item_click(
 
     QPoint sPos = ctx.item->mapToScene(relativeCenter).toPoint();
 
-    quick_mouse_click(ctx.window, sPos, Qt::LeftButton);
+    // a QML scene builds its own context menu from a right click, so the
+    // button is part of what a test asks for
+    Qt::MouseButton button = Qt::LeftButton;
+    const QString buttonName = command["button"].toString();
+    if (buttonName == "right") {
+        button = Qt::RightButton;
+    } else if (buttonName == "middle") {
+        button = Qt::MiddleButton;
+    } else if (!buttonName.isEmpty() && buttonName != "left") {
+        return createError(
+            "InvalidButton",
+            QString::fromUtf8("Unknown mouse button `%1`").arg(buttonName));
+    }
+    quick_mouse_click(ctx.window, sPos, button);
     QtJson::JsonObject result;
     return result;
 #else
@@ -1699,24 +1717,45 @@ QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
 
     // The historical contract is a test hook shaped `QVariant f(QVariant)`.
     // Real methods rarely look like that: clear() takes nothing, a QML signal
-    // such as activated(int) or a slot such as setCurrentIndex(int) takes one
-    // typed argument. The shape is read from the meta object; the hook shape
-    // wins when it exists, then a method taking nothing, then one taking a
-    // single argument the parameter converts to. Invoking a signal emits it,
-    // which is how a selection is made without going through a popup.
+    // such as activated(int) or toggled(itemId, checked) takes one or more
+    // typed arguments. The shape is read from the meta object and matched
+    // against what the caller gave: the hook shape wins when the caller gave
+    // no list, then the method whose arity matches. Invoking a signal emits
+    // it, which is how a QML control is driven without its popup.
+    QVariantList givenArguments;
+    if (params.userType() == QMetaType::QVariantList) {
+        foreach (const QVariant & value, params.toList()) {
+            givenArguments << value;
+        }
+    } else if (params.isValid() && !params.isNull()) {
+        givenArguments << params;
+    }
+    if (givenArguments.size() > gMaxInvokeArguments) {
+        return createError(
+            "NoMethodInvoked",
+            QString::fromUtf8("At most %1 arguments can be passed to %2")
+                .arg(gMaxInvokeArguments)
+                .arg(slot_name));
+    }
+
     const QMetaObject * metaObject = ctx.obj->metaObject();
     const QByteArray wanted = slot_name.toLatin1();
     QMetaMethod chosen;
-    int rank = 0;  // 3: QVariant hook, 2: no argument, 1: one typed argument
+    int rank = 0;  // 3: QVariant hook, 2: no argument, 1: arity matches
+    QStringList signatures;
     for (int i = 0; i < metaObject->methodCount(); ++i) {
         const QMetaMethod method = metaObject->method(i);
-        if (method.name() != wanted || method.parameterCount() > 1) {
+        if (method.name() != wanted) {
             continue;
         }
-        int methodRank = 1;
-        if (method.parameterCount() == 0) {
-            methodRank = 2;
-        } else if (method.parameterType(0) == QMetaType::QVariant) {
+        signatures << QString::fromLatin1(method.methodSignature());
+        int methodRank = 0;
+        if (method.parameterCount() == givenArguments.size()) {
+            methodRank = method.parameterCount() == 0 ? 2 : 1;
+        }
+        if (params.userType() != QMetaType::QVariantList &&
+            method.parameterCount() == 1 &&
+            method.parameterType(0) == QMetaType::QVariant) {
             methodRank = 3;
         }
         if (methodRank > rank) {
@@ -1727,46 +1766,66 @@ QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
     if (rank == 0) {
         return createError(
             "NoMethodInvoked",
-            QString::fromUtf8("The method %1 was not found on %2; it must take "
-                              "no argument or one")
+            QString::fromUtf8("No method %1 on %2 takes %3 argument(s); it has: %4")
                 .arg(slot_name)
-                .arg(metaObject->className()));
+                .arg(metaObject->className())
+                .arg(givenArguments.size())
+                .arg(signatures.isEmpty() ? QString("no such method")
+                                          : signatures.join(", ")));
     }
 
     const bool returnsVariant = chosen.returnType() == QMetaType::QVariant;
-    QVariant argument = params;
-    QGenericArgument genericArgument;
+    QVariantList arguments;
     if (rank == 3) {
-        genericArgument = QGenericArgument("QVariant", &argument);
-    } else if (rank == 1) {
-        const int parameterType = chosen.parameterType(0);
+        arguments << params;
+    } else if (rank >= 1) {
+        arguments = givenArguments;
+        for (int i = 0; i < arguments.size(); ++i) {
+            const int parameterType = chosen.parameterType(i);
+            if (parameterType == QMetaType::QVariant) {
+                continue;
+            }
 #if QT_VERSION_MAJOR >= 6
-        const QMetaType targetType(parameterType);
-        const bool converted = argument.convert(targetType);
-        const char * typeName = targetType.name();
+            const QMetaType targetType(parameterType);
+            const bool converted = arguments[i].convert(targetType);
+            const char * typeName = targetType.name();
 #else
-        const bool converted = argument.convert(parameterType);
+            const bool converted = arguments[i].convert(parameterType);
+            const char * typeName = QMetaType::typeName(parameterType);
+#endif
+            if (!converted) {
+                return createError(
+                    "NoMethodInvoked",
+                    QString::fromUtf8("Argument %1 of %2 must be a %3, and the "
+                                      "given value does not convert to it")
+                        .arg(i)
+                        .arg(slot_name)
+                        .arg(typeName));
+            }
+        }
+    }
+
+    QGenericArgument generic[gMaxInvokeArguments];
+    for (int i = 0; i < arguments.size(); ++i) {
+        const int parameterType =
+            rank == 3 ? int(QMetaType::QVariant) : chosen.parameterType(i);
+#if QT_VERSION_MAJOR >= 6
+        const char * typeName = QMetaType(parameterType).name();
+#else
         const char * typeName = QMetaType::typeName(parameterType);
 #endif
-        if (!converted) {
-            return createError(
-                "NoMethodInvoked",
-                QString::fromUtf8("The method %1 takes a %2, and the given "
-                                  "parameter does not convert to it")
-                    .arg(slot_name)
-                    .arg(typeName));
-        }
-        genericArgument = QGenericArgument(typeName, argument.constData());
+        generic[i] = QGenericArgument(typeName, arguments.at(i).constData());
     }
 
     bool invokedMeth;
     if (returnsVariant) {
         invokedMeth = chosen.invoke(
             ctx.obj, Qt::DirectConnection,
-            QGenericReturnArgument("QVariant", &result_slot), genericArgument);
+            QGenericReturnArgument("QVariant", &result_slot), generic[0],
+            generic[1], generic[2], generic[3]);
     } else {
-        invokedMeth =
-            chosen.invoke(ctx.obj, Qt::DirectConnection, genericArgument);
+        invokedMeth = chosen.invoke(ctx.obj, Qt::DirectConnection, generic[0],
+                                    generic[1], generic[2], generic[3]);
     }
     if (!invokedMeth) {
         return createError("NoMethodInvoked",

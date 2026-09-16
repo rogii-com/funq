@@ -156,6 +156,31 @@ class Object(object, metaclass=WidgetMetaClass):
         setattr(self, 'client', client)
         return self
 
+    def methods(self, inherited=False):
+        """
+        Returns what can be called on this object and what it holds: a dict
+        with 'methods' (name, signature, type - signal, slot or method -,
+        parameters, return_type, class) and 'properties_meta' (name, type,
+        writable, readable, notify).
+
+        :param inherited: also report what base classes declare.
+        """
+        return self.client.send_command('object_methods', oid=self.oid,
+                                        inherited=inherited)
+
+    def property_object(self, name, with_properties=False):
+        """
+        Returns the object held by a property, as an :class:`Object` or a
+        subclass - the model behind a QML control, for instance.
+
+        :param name: the property name.
+        :param with_properties: also read the properties of that object.
+        """
+        data = self.client.send_command('object_property_object', oid=self.oid,
+                                        property=name,
+                                        with_properties=with_properties)
+        return Object.create(self.client, data)
+
     def properties(self):
         """
         Returns a dict of availables properties for this object with associated
@@ -1085,18 +1110,20 @@ class QuickItem(Object):
 
     CPP_CLASS = "QQuickItem"
 
-    def click(self):
+    def click(self, button="left"):
         """
         Click on the :class:`QuickItem`.
 
-        The click is posted to the scene, so it does not move the real cursor
-        and produces no hover state. When the scene belongs to a QQuickWidget,
-        the item also sees a global position taken from the offscreen window
-        rather than from the screen.
+        The click is posted to the widget or the window rendering the scene,
+        so it does not move the real cursor and produces no hover state.
+
+        :param button: 'left', 'right' or 'middle'. A QML scene builds its
+                       own context menu from a right click.
         """
         self.client.send_command(
             "quick_item_click",
-            oid=self.oid
+            oid=self.oid,
+            button=button
         )
 
 
