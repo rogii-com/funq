@@ -1246,19 +1246,91 @@ DelayedResponse * Player::drag_n_drop(const QtJson::JsonObject & command) {
 }
 
 QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
-    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    // any QObject will do: a QML item exposes its methods the same way a
+    // widget exposes its slots, and forceActiveFocus() or selectAll() on a
+    // text field are what a test needs there
+    ObjectLocatorContext ctx(this, command, "oid");
     if (ctx.hasError()) {
         return ctx.lastError;
     }
     QString slot_name = command["slot_name"].toString();
+    QVariant params = command["params"];
     QVariant result_slot;
-    bool invokedMeth = QMetaObject::invokeMethod(
-        ctx.widget, slot_name.toLocal8Bit().data(), Qt::DirectConnection,
-        Q_RETURN_ARG(QVariant, result_slot),
-        Q_ARG(QVariant, command["params"]));
+
+    // The historical contract is a test hook shaped `QVariant f(QVariant)`.
+    // Real methods rarely look like that: clear() takes nothing, a QML signal
+    // such as activated(int) or a slot such as setCurrentIndex(int) takes one
+    // typed argument. The shape is read from the meta object; the hook shape
+    // wins when it exists, then a method taking nothing, then one taking a
+    // single argument the parameter converts to. Invoking a signal emits it,
+    // which is how a selection is made without going through a popup.
+    const QMetaObject * metaObject = ctx.obj->metaObject();
+    const QByteArray wanted = slot_name.toLatin1();
+    QMetaMethod chosen;
+    int rank = 0;  // 3: QVariant hook, 2: no argument, 1: one typed argument
+    for (int i = 0; i < metaObject->methodCount(); ++i) {
+        const QMetaMethod method = metaObject->method(i);
+        if (method.name() != wanted || method.parameterCount() > 1) {
+            continue;
+        }
+        int methodRank = 1;
+        if (method.parameterCount() == 0) {
+            methodRank = 2;
+        } else if (method.parameterType(0) == QMetaType::QVariant) {
+            methodRank = 3;
+        }
+        if (methodRank > rank) {
+            chosen = method;
+            rank = methodRank;
+        }
+    }
+    if (rank == 0) {
+        return createError(
+            "NoMethodInvoked",
+            QString::fromUtf8("The method %1 was not found on %2; it must take "
+                              "no argument or one")
+                .arg(slot_name)
+                .arg(metaObject->className()));
+    }
+
+    const bool returnsVariant = chosen.returnType() == QMetaType::QVariant;
+    QVariant argument = params;
+    QGenericArgument genericArgument;
+    if (rank == 3) {
+        genericArgument = QGenericArgument("QVariant", &argument);
+    } else if (rank == 1) {
+        const int parameterType = chosen.parameterType(0);
+#if QT_VERSION_MAJOR >= 6
+        const QMetaType targetType(parameterType);
+        const bool converted = argument.convert(targetType);
+        const char * typeName = targetType.name();
+#else
+        const bool converted = argument.convert(parameterType);
+        const char * typeName = QMetaType::typeName(parameterType);
+#endif
+        if (!converted) {
+            return createError(
+                "NoMethodInvoked",
+                QString::fromUtf8("The method %1 takes a %2, and the given "
+                                  "parameter does not convert to it")
+                    .arg(slot_name)
+                    .arg(typeName));
+        }
+        genericArgument = QGenericArgument(typeName, argument.constData());
+    }
+
+    bool invokedMeth;
+    if (returnsVariant) {
+        invokedMeth = chosen.invoke(
+            ctx.obj, Qt::DirectConnection,
+            QGenericReturnArgument("QVariant", &result_slot), genericArgument);
+    } else {
+        invokedMeth =
+            chosen.invoke(ctx.obj, Qt::DirectConnection, genericArgument);
+    }
     if (!invokedMeth) {
         return createError("NoMethodInvoked",
-                           QString::fromUtf8("The slot %1 could not be called")
+                           QString::fromUtf8("The method %1 could not be called")
                                .arg(slot_name));
     }
 
