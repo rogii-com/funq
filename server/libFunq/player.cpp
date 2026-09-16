@@ -173,13 +173,12 @@ void dump_object(QObject * object, QtJson::JsonObject & out,
     out["classes"] = classes;
 #ifdef QT_QUICK_LIB
     if (QQuickItem * item = qobject_cast<QQuickItem *>(object)) {
+        // "path" walks object parents and stops at the offscreen window, so no
+        // lookup accepts it back. This one is what quick_item_find takes.
+        out["quick_path"] = quickItemPath(item);
         // A QML item has no position on screen of its own. The client turns
         // this rect into screen coordinates with the global position of the
         // widget or the window that renders the scene.
-        // "path" walks object parents and stops at the offscreen window, so
-        // it cannot be fed back to a lookup. This one is what quick_item_find
-        // takes as a path.
-        out["quick_path"] = quickItemPath(item);
         const QPointF topLeft = item->mapToScene(QPointF(0, 0));
         QtJson::JsonObject sceneRect;
         sceneRect["x"] = topLeft.x();
@@ -570,7 +569,7 @@ void recursive_list_widget(QWidget * widget, QtJson::JsonObject & out,
             recursive_list_widget(subWidget, resultWidgets, with_properties);
         }
     }
-#ifdef QT_QUICKWIDGETS_LIB
+#if defined(QT_QUICK_LIB) && defined(QT_QUICKWIDGETS_LIB)
     // The QML scene of a QQuickWidget hangs off an offscreen window rather
     // than off the widget, so walking children() never reaches it and the
     // widget looks like a leaf. Listing the children of the content item

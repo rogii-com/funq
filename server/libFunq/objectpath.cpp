@@ -242,8 +242,33 @@ static bool quickItemHasName(QQuickItem * item, const QString & name) {
     return ctx && ctx->nameForObject(item) == name;
 }
 
+/**
+ * Searches the item tree for an item answering to the whole name.
+ */
+static QQuickItem * findQuickItemByName(QQuickItem * root,
+                                        const QString & name) {
+    QList<QQuickItem *> items;
+    items << root;
+
+    while (!items.isEmpty()) {
+        QQuickItem * item = items.first();
+        items.removeFirst();
+        if (quickItemHasName(item, name)) {
+            return item;
+        }
+        items += item->childItems();
+    }
+    return NULL;
+}
+
 QQuickItem * ObjectPath::findQuickItemById(QQuickItem * root,
                                            const QString & qid) {
+    // an objectName may contain dots of its own ("Calculator.formulaField"),
+    // so the whole name is tried before it is read as a chain of ids
+    if (QQuickItem * item = findQuickItemByName(root, qid)) {
+        return item;
+    }
+
     QStringList qids = qid.split(".");
     if (qids.isEmpty()) {
         return NULL;
