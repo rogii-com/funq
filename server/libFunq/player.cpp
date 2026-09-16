@@ -352,14 +352,35 @@ QModelIndex get_model_item(QAbstractItemModel * model, const QString & path,
     return model->index(row, column, parent);
 }
 
+void dump_rect(const QRectF & rect, const QString & prefix,
+               QtJson::JsonObject & out) {
+    QtJson::JsonObject dumped;
+    dumped["x"] = rect.x();
+    dumped["y"] = rect.y();
+    dumped["width"] = rect.width();
+    dumped["height"] = rect.height();
+    out[prefix] = dumped;
+}
+
+/**
+ * Describes the items of a graphics scene.
+ *
+ * Where an item is drawn is what a test has to go on: most scene items are not
+ * QObjects, so they answer to no name and carry no property, and a bare
+ * identifier tells nothing about which of them is the horizon and which the
+ * trajectory. The rectangles are given in the three frames a caller needs -
+ * the scene the application computes in, the view it scrolls, and the screen.
+ */
 void dump_graphics_items(const QList<QGraphicsItem *> & items,
-                         const qulonglong & viewid, QtJson::JsonObject & out) {
+                         QGraphicsView * view, const qulonglong & viewid,
+                         QtJson::JsonObject & out) {
     QtJson::JsonArray outitems;
     foreach (QGraphicsItem * item, items) {
         QtJson::JsonObject outitem;
         outitem["gid"] = graphicsItemId(item);
         outitem["viewid"] = viewid;
         QObject * itemObject = dynamic_cast<QObject *>(item);
+        outitem["is_qobject"] = itemObject != NULL;
         if (itemObject) {
             const QMetaObject * mo = itemObject->metaObject();
             QStringList classes;
@@ -370,7 +391,33 @@ void dump_graphics_items(const QList<QGraphicsItem *> & items,
             outitem["classes"] = classes;
             outitem["objectname"] = itemObject->objectName();
         }
-        dump_graphics_items(item->childItems(), viewid, outitem);
+        outitem["type"] = item->type();
+        outitem["visible"] = item->isVisible();
+        outitem["enabled"] = item->isEnabled();
+        outitem["selected"] = item->isSelected();
+        outitem["z"] = item->zValue();
+        const QRectF sceneRect =
+            item->mapToScene(item->boundingRect()).boundingRect();
+        dump_rect(sceneRect, "scene_rect", outitem);
+        if (view) {
+            // Scenes here span billions of units, and mapping such a rectangle
+            // into the view overflows the int arithmetic QRect is built on -
+            // Qt asserts on it. What a caller can click is what the viewport
+            // shows, so the rectangle is clipped to that first.
+            const QRectF shown =
+                view->mapToScene(view->viewport()->rect()).boundingRect();
+            const QRectF clipped = sceneRect.intersected(shown);
+            if (!clipped.isEmpty()) {
+                const QRect viewRect =
+                    view->mapFromScene(clipped).boundingRect();
+                dump_rect(viewRect, "view_rect", outitem);
+                QRect globalRect = viewRect;
+                globalRect.moveTopLeft(
+                    view->viewport()->mapToGlobal(viewRect.topLeft()));
+                dump_rect(globalRect, "global_rect", outitem);
+            }
+        }
+        dump_graphics_items(item->childItems(), view, viewid, outitem);
         outitems << outitem;
     }
     out["items"] = outitems;
@@ -1537,11 +1584,24 @@ QtJson::JsonObject Player::model_gitem_action(
                 .arg(ctx.id)
                 .arg(gid));
     }
-    ctx.widget->ensureVisible(item);  // be sure item is visible
+    if (command["ensure_visible"].isNull() ||
+        command["ensure_visible"].toBool()) {
+        ctx.widget->ensureVisible(item);
+    }
     QString itemaction = command["itemaction"].toString();
 
-    QPoint viewPos = ctx.widget->mapFromScene(
-        item->mapToScene(item->boundingRect().center()));
+    // The centre of the bounding rectangle is not on the item when the item is
+    // a long polyline - a horizon crossing the section has its centre in empty
+    // space - so a caller may name the point itself, in the item's own
+    // coordinates or in the scene's.
+    QPointF scenePos;
+    if (!command["x"].isNull() && !command["y"].isNull()) {
+        const QPointF given(command["x"].toDouble(), command["y"].toDouble());
+        scenePos = command["scene"].toBool() ? given : item->mapToScene(given);
+    } else {
+        scenePos = item->mapToScene(item->boundingRect().center());
+    }
+    QPoint viewPos = ctx.widget->mapFromScene(scenePos);
     if (itemaction == "click" || itemaction == "rightclick" ||
         itemaction == "middleclick") {
         if (ctx.widget->scene() && ctx.widget->scene()->mouseGrabberItem()) {
@@ -1782,7 +1842,45 @@ QtJson::JsonObject Player::graphicsitems(const QtJson::JsonObject & command) {
         }
     }
     QtJson::JsonObject result;
-    dump_graphics_items(topLevelItems, ctx.id, result);
+    dump_graphics_items(topLevelItems, ctx.widget, ctx.id, result);
+    return result;
+}
+
+/**
+ * The items under a point, topmost first.
+ *
+ * A scene item has no name to look up, so a point is the only way to say which
+ * one is meant; the product usually knows the scene coordinates of what it
+ * drew, hence the choice of frame.
+ */
+QtJson::JsonObject Player::gitems_at(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QGraphicsView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    const bool inScene = command["scene"].toBool();
+    QList<QGraphicsItem *> items;
+    if (inScene) {
+        if (!ctx.widget->scene()) {
+            return createError("MissingScene",
+                               QString::fromUtf8("The view (id:%1) has no scene")
+                                   .arg(ctx.id));
+        }
+        items = ctx.widget->scene()->items(
+            QPointF(command["x"].toDouble(), command["y"].toDouble()));
+    } else {
+        items = ctx.widget->items(
+            QPoint(command["x"].toInt(), command["y"].toInt()));
+    }
+    QtJson::JsonObject result;
+    QtJson::JsonArray outitems;
+    foreach (QGraphicsItem * item, items) {
+        QtJson::JsonObject one;
+        dump_graphics_items(QList<QGraphicsItem *>() << item, ctx.widget, ctx.id,
+                            one);
+        outitems << one["items"].toList().value(0);
+    }
+    result["items"] = outitems;
     return result;
 }
 
