@@ -53,6 +53,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QMenu>
 #include <QMetaMethod>
 #include <QMouseEvent>
+#include <QSet>
 #include <QStringList>
 #include <QTableView>
 #include <QTime>
@@ -496,15 +497,35 @@ QtJson::JsonObject Player::quick_item_at(const QtJson::JsonObject & command) {
 }
 
 QtJson::JsonObject Player::active_widget(const QtJson::JsonObject & command) {
-    QObject * active;
+    QObject * active = NULL;
     QString type = command["type"].toString();
     if (type == "modal") {
         active = QApplication::activeModalWidget();
         if (!active) {
             active = QApplication::modalWindow();
         }
-    } else if (type == "popup") {
-        active = QApplication::activePopupWidget();
+    } else if (type == "popup" || type == "popup_window") {
+        if (type == "popup") {
+            active = QApplication::activePopupWidget();
+        }
+        if (!active) {
+            // A QML Menu is a window of its own, not a widget: the style
+            // decides, and a popup window is what Qt Quick Controls use by
+            // default. activePopupWidget() never reports one.
+            QWindow * focus = QGuiApplication::focusWindow();
+            if (focus && focus->isVisible() &&
+                (focus->flags() & Qt::WindowType_Mask) == Qt::Popup) {
+                active = focus;
+            } else {
+                foreach (QWindow * window, QGuiApplication::topLevelWindows()) {
+                    if (window->isVisible() &&
+                        (window->flags() & Qt::WindowType_Mask) == Qt::Popup) {
+                        // the last one opened is the innermost submenu
+                        active = window;
+                    }
+                }
+            }
+        }
     } else if (type == "focus") {
         active = QApplication::focusWidget();
         if (!active) {
@@ -635,11 +656,10 @@ void recursive_list_quick_item(QQuickItem * item, QtJson::JsonObject & out,
  * a leaf. Listing the children of the content item matches what
  * findQuickItem() expects a path to start with.
  */
-void list_quick_scene(QWidget * widget, QtJson::JsonObject & out,
+void list_quick_scene(QObject * object, QtJson::JsonObject & out,
                       bool with_properties) {
-#if defined(QT_QUICK_LIB) && defined(QT_QUICKWIDGETS_LIB)
-    QQuickWidget * quickWidget = qobject_cast<QQuickWidget *>(widget);
-    QQuickWindow * window = quickWidget ? quickWidget->quickWindow() : NULL;
+#ifdef QT_QUICK_LIB
+    QQuickWindow * window = resolveQuickWindow(object);
     QQuickItem * content = window ? window->contentItem() : NULL;
     if (content) {
         foreach (QQuickItem * child, content->childItems()) {
@@ -647,7 +667,7 @@ void list_quick_scene(QWidget * widget, QtJson::JsonObject & out,
         }
     }
 #else
-    Q_UNUSED(widget);
+    Q_UNUSED(object);
     Q_UNUSED(out);
     Q_UNUSED(with_properties);
 #endif
@@ -682,12 +702,10 @@ QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
                 recursive_list_widget(subWidget, result, with_properties);
             }
         }
-        // the QML scene of the widget asked about, which is not among its
-        // children: without this, listing a QQuickWidget by its oid answers
-        // nothing while listing its parent shows the whole scene
-        if (QWidget * asked = qobject_cast<QWidget *>(ctx.obj)) {
-            list_quick_scene(asked, result, with_properties);
-        }
+        // the QML scene of the object asked about, which is not among its
+        // children: without this, listing a QQuickWidget or a popup window by
+        // its oid answers nothing while listing its parent shows the scene
+        list_quick_scene(ctx.obj, result, with_properties);
     } else {
         registerTopLevelObjects();
         QList<QWidget *> widgets = QApplication::topLevelWidgets();
@@ -704,6 +722,64 @@ QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
                 result[resultWindow["path"].toString()] = resultWindow;
             }
         }
+    }
+    return result;
+}
+
+QtJson::JsonObject Player::windows_list(const QtJson::JsonObject & command) {
+    const bool with_properties = command["with_properties"].toBool();
+    const bool with_scene = command["with_scene"].toBool();
+    const bool only_popups = command["only_popups"].toBool();
+    registerTopLevelObjects();
+
+    // Every top-level widget has a window of its own behind it, and every
+    // QQuickWidget an offscreen one; both are already reachable as widgets, so
+    // reporting them again would bury the windows that are only windows - a
+    // QML menu, for one.
+    QSet<QWindow *> backing;
+    foreach (QWidget * widget, QApplication::topLevelWidgets()) {
+        if (widget->windowHandle()) {
+            backing.insert(widget->windowHandle());
+        }
+    }
+
+    QtJson::JsonObject result;
+    foreach (QWindow * window, QGuiApplication::topLevelWindows()) {
+        if (backing.contains(window)) {
+            continue;
+        }
+#if defined(QT_QUICK_LIB) && defined(QT_QUICKWIDGETS_LIB)
+        if (QQuickWindow * quickWindow = qobject_cast<QQuickWindow *>(window)) {
+            if (hostingQuickWidget(quickWindow)) {
+                continue;
+            }
+        }
+#endif
+        const bool isPopup =
+            (window->flags() & Qt::WindowType_Mask) == Qt::Popup;
+        if (only_popups && !isPopup) {
+            continue;
+        }
+        QtJson::JsonObject dumped;
+        dumped["oid"] = registerObject(window);
+        dump_object(window, dumped, with_properties);
+        dumped["visible"] = window->isVisible();
+        dumped["active"] = window->isActive();
+        dumped["is_popup"] = isPopup;
+        const QRect geometry = window->geometry();
+        dumped["x"] = geometry.x();
+        dumped["y"] = geometry.y();
+        dumped["width"] = geometry.width();
+        dumped["height"] = geometry.height();
+        if (window->transientParent()) {
+            dumped["transient_parent"] = objectPath(window->transientParent());
+        }
+        if (with_scene) {
+            QtJson::JsonObject scene;
+            list_quick_scene(window, scene, with_properties);
+            dumped["children"] = scene;
+        }
+        result[dumped["path"].toString()] = dumped;
     }
     return result;
 }
