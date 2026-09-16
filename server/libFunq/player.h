@@ -116,8 +116,8 @@ public slots:
 protected:
     QtJson::JsonObject createQtQuickOnlyError() {
         return createError("QtQuickOnly",
-                           "this method can only be called for a Qt5 app "
-                           "compiled with Qyt Quick.");
+                           "this method can only be called for an application "
+                           "compiled with Qt Quick.");
     }
 
 private:

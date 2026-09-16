@@ -116,6 +116,29 @@ void mouse_dclick(T * w, const QPoint & pos) {
                         Qt::LeftButton, Qt::NoButton, Qt::NoModifier));
 }
 
+#ifdef QT_QUICK_LIB
+/**
+ * Posts a click into a QML scene.
+ *
+ * The window may be the offscreen window of a QQuickWidget, which has no
+ * window on the screen, so the events are posted to the window object itself -
+ * the way QQuickWidget forwards the events it receives. For the same reason
+ * the global position is only as good as the position of that offscreen
+ * window: an item that reads it will not see where the click really landed on
+ * the screen.
+ */
+void quick_mouse_click(QQuickWindow * window, const QPoint & pos,
+                       Qt::MouseButton button) {
+    const QPoint global_pos = window->mapToGlobal(pos);
+    qApp->postEvent(window,
+                    new QMouseEvent(QEvent::MouseButtonPress, pos, global_pos,
+                                    button, button, Qt::NoModifier));
+    qApp->postEvent(window,
+                    new QMouseEvent(QEvent::MouseButtonRelease, pos, global_pos,
+                                    button, Qt::NoButton, Qt::NoModifier));
+}
+#endif
+
 void activate_focus(QWidget * w) {
     w->activateWindow();
     w->setFocus(Qt::MouseFocusReason);
@@ -644,10 +667,6 @@ QtJson::JsonObject Player::widget_click(const QtJson::JsonObject & command) {
 QtJson::JsonObject Player::quick_item_click(
     const QtJson::JsonObject & command) {
 #ifdef QT_QUICK_LIB
-#if QT_VERSION_MAJOR >= 6
-    return createError(
-        "Qt5Only", "This method is currently not supported with Qt6.");
-#endif
     QuickItemLocatorContext ctx(this, command, "oid");
     if (ctx.hasError()) {
         return ctx.lastError;
@@ -657,7 +676,7 @@ QtJson::JsonObject Player::quick_item_click(
 
     QPoint sPos = ctx.item->mapToScene(relativeCenter).toPoint();
 
-    mouse_click(ctx.window, sPos, Qt::LeftButton);
+    quick_mouse_click(ctx.window, sPos, Qt::LeftButton);
     QtJson::JsonObject result;
     return result;
 #else
