@@ -35,7 +35,9 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #ifndef OBJECTPATH_H
 #define OBJECTPATH_H
 
+#include <QList>
 #include <QObject>
+#include <QPointF>
 #include <QString>
 
 class QGraphicsItem;
@@ -52,6 +54,7 @@ QObject * findObject(const QString & path);
 QString quickItemPath(QQuickItem * item);
 QQuickItem * findQuickItem(QQuickWindow * window, const QString & path);
 QQuickItem * findQuickItemById(QQuickItem * root, const QString & qid);
+QList<QQuickItem *> quickItemsAt(QQuickItem * root, const QPointF & scenePos);
 #endif
 
 qulonglong graphicsItemId(QGraphicsItem * item);

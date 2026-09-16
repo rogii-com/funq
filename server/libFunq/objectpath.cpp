@@ -158,7 +158,7 @@ QGraphicsItem * ObjectPath::graphicsItemFromId(QGraphicsView * view,
 /* quick items stuff */
 
 #ifdef QT_QUICK_LIB
-QString quickItemPath(QQuickItem * item) {
+QString ObjectPath::quickItemPath(QQuickItem * item) {
     QStringList components;
     QQuickItem * current = item;
     while (current) {
@@ -195,6 +195,22 @@ QQuickItem * ObjectPath::findQuickItem(QQuickWindow * window,
     return root;
 }
 
+/**
+ * Tells whether an item answers to the given name, either by its qml id or by
+ * its objectName. Ids of delegates in a Repeater or a ListView are not unique,
+ * so an objectName is often the only stable way to designate an item.
+ */
+static bool quickItemHasName(QQuickItem * item, const QString & name) {
+    if (name.isEmpty()) {
+        return false;
+    }
+    if (item->objectName() == name) {
+        return true;
+    }
+    QQmlContext * ctx = QQmlEngine::contextForObject(item);
+    return ctx && ctx->nameForObject(item) == name;
+}
+
 QQuickItem * ObjectPath::findQuickItemById(QQuickItem * root,
                                            const QString & qid) {
     QStringList qids = qid.split(".");
@@ -207,8 +223,7 @@ QQuickItem * ObjectPath::findQuickItemById(QQuickItem * root,
     while (!items.isEmpty()) {
         QQuickItem * item = items.first();
         items.removeFirst();
-        QQmlContext * ctx = QQmlEngine::contextForObject(item);
-        if (ctx && ctx->nameForObject(item) == qids.first()) {
+        if (quickItemHasName(item, qids.first())) {
             qids.removeFirst();
             if (qids.isEmpty()) {
                 return item;
@@ -218,6 +233,22 @@ QQuickItem * ObjectPath::findQuickItemById(QQuickItem * root,
         items += item->childItems();
     }
     return NULL;
+}
+
+QList<QQuickItem *> ObjectPath::quickItemsAt(QQuickItem * root,
+                                             const QPointF & scenePos) {
+    QList<QQuickItem *> items;
+    QQuickItem * current = root;
+    while (current) {
+        const QPointF local = current->mapFromScene(scenePos);
+        QQuickItem * child = current->childAt(local.x(), local.y());
+        if (!child || child == current) {
+            break;
+        }
+        items << child;
+        current = child;
+    }
+    return items;
 }
 
 #endif  // quick item stuff
