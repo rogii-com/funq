@@ -110,6 +110,7 @@ public slots:
     QtJson::JsonObject quit(const QtJson::JsonObject & command);
 
     QtJson::JsonObject quick_item_find(const QtJson::JsonObject & command);
+    QtJson::JsonObject quick_item_at(const QtJson::JsonObject & command);
     QtJson::JsonObject quick_item_click(const QtJson::JsonObject & command);
 
 protected:
@@ -170,12 +171,24 @@ public:
 };
 
 #ifdef QT_QUICK_LIB
+/**
+ * @brief Allow to find the window holding a QML scene, from a previously
+ * referenced QQuickWindow or QQuickWidget.
+ */
+class QuickWindowLocatorContext : public ObjectLocatorContext {
+public:
+    QuickWindowLocatorContext(Player * player,
+                              const QtJson::JsonObject & command,
+                              const QString & objKey);
+    QQuickWindow * window = NULL;
+};
+
 class QuickItemLocatorContext : public ObjectLocatorContext {
 public:
     QuickItemLocatorContext(Player * player, const QtJson::JsonObject & command,
                             const QString & objKey);
-    QQuickItem * item;
-    QQuickWindow * window;
+    QQuickItem * item = NULL;
+    QQuickWindow * window = NULL;
 };
 #endif
 

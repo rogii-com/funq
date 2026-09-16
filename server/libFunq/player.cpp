@@ -341,23 +341,15 @@ QtJson::JsonObject Player::widget_by_path(const QtJson::JsonObject & command) {
 QtJson::JsonObject Player::quick_item_find(const QtJson::JsonObject & command) {
     QtJson::JsonObject result;
 #ifdef QT_QUICK_LIB
-    ObjectLocatorContext ctx(this, command, "quick_window_oid");
+    QuickWindowLocatorContext ctx(this, command, "quick_window_oid");
     if (ctx.hasError()) {
         return ctx.lastError;
-    }
-    QQuickWindow * window = resolveQuickWindow(ctx.obj);
-    if (!window) {
-        return createError(
-            "NotAQuickWindow",
-            QString::fromUtf8(
-                "Object (id:%1) is neither a QQuickWindow nor a QQuickWidget")
-                .arg(ctx.id));
     }
     QQuickItem * item = NULL;
     qulonglong id;
     QString qid = command["qid"].toString();
     if (!qid.isEmpty()) {
-        item = ObjectPath::findQuickItemById(window->contentItem(), qid);
+        item = ObjectPath::findQuickItemById(ctx.window->contentItem(), qid);
         id = registerObject(item);
         if (id == 0) {
             return createError(
@@ -366,7 +358,7 @@ QtJson::JsonObject Player::quick_item_find(const QtJson::JsonObject & command) {
         }
     } else {
         QString path = command["path"].toString();
-        item = ObjectPath::findQuickItem(window, path);
+        item = ObjectPath::findQuickItem(ctx.window, path);
         id = registerObject(item);
         if (id == 0) {
             return createError(
@@ -377,6 +369,31 @@ QtJson::JsonObject Player::quick_item_find(const QtJson::JsonObject & command) {
     result["oid"] = id;
     result["quick_window_oid"] = command["quick_window_oid"].toString();
     dump_object(item, result);
+#else
+    Q_UNUSED(command);
+    result = createQtQuickOnlyError();
+#endif
+    return result;
+}
+
+QtJson::JsonObject Player::quick_item_at(const QtJson::JsonObject & command) {
+    QtJson::JsonObject result;
+#ifdef QT_QUICK_LIB
+    QuickWindowLocatorContext ctx(this, command, "quick_window_oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    const QPointF scenePos(command["x"].toDouble(), command["y"].toDouble());
+    const bool with_properties = command["with_properties"].toBool();
+    QtJson::JsonArray items;
+    foreach (QQuickItem * item,
+             ObjectPath::quickItemsAt(ctx.window->contentItem(), scenePos)) {
+        QtJson::JsonObject dumped;
+        dumped["oid"] = registerObject(item);
+        dump_object(item, dumped, with_properties);
+        items << dumped;
+    }
+    result["items"] = items;
 #else
     Q_UNUSED(command);
     result = createQtQuickOnlyError();
@@ -435,6 +452,21 @@ ObjectLocatorContext::ObjectLocatorContext(Player * player,
 }
 
 #ifdef QT_QUICK_LIB
+QuickWindowLocatorContext::QuickWindowLocatorContext(
+    Player * player, const QtJson::JsonObject & command, const QString & objKey)
+    : ObjectLocatorContext(player, command, objKey) {
+    if (!hasError()) {
+        window = resolveQuickWindow(obj);
+        if (!window) {
+            lastError = player->createError(
+                "NotAQuickWindow",
+                QString::fromUtf8("Object (id:%1) is neither a QQuickWindow "
+                                  "nor a QQuickWidget")
+                    .arg(id));
+        }
+    }
+}
+
 QuickItemLocatorContext::QuickItemLocatorContext(
     Player * player, const QtJson::JsonObject & command, const QString & objKey)
     : ObjectLocatorContext(player, command, objKey) {
