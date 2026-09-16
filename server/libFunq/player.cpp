@@ -148,6 +148,20 @@ void dump_object(QObject * object, QtJson::JsonObject & out,
         mo = mo->superClass();
     }
     out["classes"] = classes;
+#ifdef QT_QUICK_LIB
+    if (QQuickItem * item = qobject_cast<QQuickItem *>(object)) {
+        // A QML item has no position on screen of its own. The client turns
+        // this rect into screen coordinates with the global position of the
+        // widget or the window that renders the scene.
+        const QPointF topLeft = item->mapToScene(QPointF(0, 0));
+        QtJson::JsonObject sceneRect;
+        sceneRect["x"] = topLeft.x();
+        sceneRect["y"] = topLeft.y();
+        sceneRect["width"] = item->width();
+        sceneRect["height"] = item->height();
+        out["scene_rect"] = sceneRect;
+    }
+#endif
     if (with_properties) {
         QtJson::JsonObject properties;
         dump_properties(object, properties);
