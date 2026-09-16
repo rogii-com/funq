@@ -708,6 +708,24 @@ class TreeView(AbstractItemView):
     """
     CPP_CLASS = 'QTreeView'
 
+    def expand_item(self, item):
+        """
+        Expand the specified item, whatever its position in the view.
+
+        :param ModelItem item: The item to expand (object retrieved from
+                               (:meth:`model`)).
+        """
+        self._item_action(item, "expand")
+
+    def collapse_item(self, item):
+        """
+        Collapse the specified item.
+
+        :param ModelItem item: The item to collapse (object retrieved from
+                               (:meth:`model`)).
+        """
+        self._item_action(item, "collapse")
+
     def header(self, timeout=2.0, timeout_interval=0.1, wait_active=True):
         """
         Return the :class:`HeaderView` associated to this treeview.

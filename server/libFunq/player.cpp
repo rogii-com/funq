@@ -42,11 +42,15 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
+#include <QBrush>
 #include <QBuffer>
 #include <QComboBox>
+#include <QFont>
 #include <QGraphicsItem>
 #include <QGraphicsView>
 #include <QHeaderView>
+#include <QItemSelectionModel>
+#include <QMenu>
 #include <QMetaMethod>
 #include <QMouseEvent>
 #include <QStringList>
@@ -240,9 +244,22 @@ QString item_model_path(QAbstractItemModel * model, const QModelIndex & item) {
     return path.join("/");
 }
 
+QString check_state_name(Qt::CheckState state) {
+    switch (state) {
+        case Qt::Unchecked:
+            return "unchecked";
+        case Qt::PartiallyChecked:
+            return "partiallyChecked";
+        case Qt::Checked:
+            return "checked";
+    }
+    return QString();
+}
+
 void dump_item_model_attrs(QAbstractItemModel * model, QtJson::JsonObject & out,
                            const QModelIndex & index,
-                           const qulonglong & modelId) {
+                           const qulonglong & modelId,
+                           bool with_details = false) {
     out["modelid"] = modelId;
     QString path = item_model_path(model, index);
     if (!path.isEmpty()) {
@@ -254,34 +271,48 @@ void dump_item_model_attrs(QAbstractItemModel * model, QtJson::JsonObject & out,
 
     QVariant checkable = model->data(index, Qt::CheckStateRole);
     if (checkable.isValid()) {
-        Qt::CheckState state = static_cast<Qt::CheckState>(checkable.toUInt());
-        QString stringState;
-        switch (state) {
-            case Qt::Unchecked:
-                stringState = "unchecked";
-                break;
-            case Qt::PartiallyChecked:
-                stringState = "partiallyChecked";
-                break;
-            case Qt::Checked:
-                stringState = "checked";
-                break;
+        out["check_state"] = check_state_name(
+            static_cast<Qt::CheckState>(checkable.toUInt()));
+    }
+
+    if (with_details) {
+        // what a row shows besides its text: an application marks the active
+        // object in bold or greys out a disabled one, and a test wants to
+        // assert that without a screenshot
+        out["has_children"] = model->hasChildren(index);
+        const Qt::ItemFlags flags = model->flags(index);
+        out["enabled"] = bool(flags & Qt::ItemIsEnabled);
+        out["editable"] = bool(flags & Qt::ItemIsEditable);
+        out["has_icon"] = model->data(index, Qt::DecorationRole).isValid();
+        const QVariant font = model->data(index, Qt::FontRole);
+        if (font.canConvert<QFont>()) {
+            const QFont itemFont = font.value<QFont>();
+            out["bold"] = itemFont.bold();
+            out["italic"] = itemFont.italic();
         }
-        out["check_state"] = stringState;
+        const QVariant foreground = model->data(index, Qt::ForegroundRole);
+        if (foreground.canConvert<QBrush>()) {
+            out["foreground"] = foreground.value<QBrush>().color().name();
+        }
+        const QVariant tooltip = model->data(index, Qt::ToolTipRole);
+        if (tooltip.isValid()) {
+            out["tooltip"] = tooltip.toString();
+        }
     }
 }
 
 void dump_items_model(QAbstractItemModel * model, QtJson::JsonObject & out,
                       const QModelIndex & parent, const qulonglong & modelId,
-                      bool recursive = true) {
+                      bool recursive = true, bool with_details = false) {
     QtJson::JsonArray items;
     for (int i = 0; i < model->rowCount(parent); ++i) {
         for (int j = 0; j < model->columnCount(parent); ++j) {
             QModelIndex index = model->index(i, j, parent);
             QtJson::JsonObject item;
-            dump_item_model_attrs(model, item, index, modelId);
+            dump_item_model_attrs(model, item, index, modelId, with_details);
             if (j == 0 && recursive && model->hasChildren(index)) {
-                dump_items_model(model, item, index, modelId);
+                dump_items_model(model, item, index, modelId, true,
+                                 with_details);
             }
             items << item;
         }
@@ -856,7 +887,8 @@ QtJson::JsonObject Player::model_items(const QtJson::JsonObject & command) {
     QtJson::JsonObject result;
     bool recursive = !(ctx.obj->inherits("QAbstractTableModel") ||
                        ctx.obj->inherits("QAbstractListModel"));
-    dump_items_model(model, result, QModelIndex(), ctx.id, recursive);
+    dump_items_model(model, result, QModelIndex(), ctx.id, recursive,
+                     command["with_details"].toBool());
     return result;
 }
 
@@ -887,7 +919,8 @@ QtJson::JsonObject Player::model_item_action(
 
     QPoint cursorPosition;
 
-    if (itemaction == "click" || itemaction == "doubleclick") {
+    if (itemaction == "click" || itemaction == "doubleclick" ||
+        itemaction == "contextmenu") {
         QString origin = command["origin"].toString();
         int offsetX = command["offset_x"].toInt();
         int offsetY = command["offset_y"].toInt();
@@ -916,10 +949,61 @@ QtJson::JsonObject Player::model_item_action(
         cursorPosition.setY(newY);
     }
 
+    QString resultingCheckState;
     if (itemaction == "select") {
         _model_item_action(itemaction, ctx.widget, index);
     } else if (itemaction == "edit") {
         _model_item_action(itemaction, ctx.widget, index);
+    } else if (itemaction == "scrollto") {
+        // the scrollTo() above is the whole action: bring the item into view
+        // and leave the selection alone, unlike "select"
+    } else if (itemaction == "expand" || itemaction == "collapse") {
+        QTreeView * tree = qobject_cast<QTreeView *>(ctx.widget);
+        if (!tree) {
+            return createError(
+                "NotATreeView",
+                QString::fromUtf8("The view (id:%1) is not a QTreeView, it "
+                                  "cannot %2 an item")
+                    .arg(ctx.id)
+                    .arg(itemaction));
+        }
+        tree->setExpanded(index, itemaction == "expand");
+    } else if (itemaction == "check" || itemaction == "uncheck" ||
+               itemaction == "toggle") {
+        // the same setData() the check box delegate performs on a click
+        const QVariant current = model->data(index, Qt::CheckStateRole);
+        if (!current.isValid()) {
+            return createError(
+                "NotCheckable",
+                QString::fromUtf8("The item %1 has no check state")
+                    .arg(command["itempath"].toString()));
+        }
+        Qt::CheckState state = Qt::Checked;
+        if (itemaction == "uncheck" ||
+            (itemaction == "toggle" &&
+             static_cast<Qt::CheckState>(current.toUInt()) == Qt::Checked)) {
+            state = Qt::Unchecked;
+        }
+        if (!model->setData(index, state, Qt::CheckStateRole)) {
+            return createError(
+                "CheckStateRefused",
+                QString::fromUtf8("The model refused the check state of item %1")
+                    .arg(command["itempath"].toString()));
+        }
+        resultingCheckState = check_state_name(static_cast<Qt::CheckState>(
+            model->data(index, Qt::CheckStateRole).toUInt()));
+    } else if (itemaction == "contextmenu") {
+        // A right click of its own opens no context menu: the platform, not
+        // the mouse event, is what makes Qt deliver a context menu event, so a
+        // synthesized click never reaches contextMenuEvent(). Post that event
+        // instead. It is posted, not sent: a menu shown with exec() runs a
+        // nested event loop, and sending would block this command until the
+        // menu closes.
+        ctx.widget->setCurrentIndex(index);
+        QWidget * viewport = ctx.widget->viewport();
+        qApp->postEvent(viewport, new QContextMenuEvent(
+                                      QContextMenuEvent::Mouse, cursorPosition,
+                                      viewport->mapToGlobal(cursorPosition)));
     } else if (itemaction == "click") {
         mouse_click(ctx.widget->viewport(), cursorPosition, Qt::LeftButton);
     } else if (itemaction == "rightclick") {
