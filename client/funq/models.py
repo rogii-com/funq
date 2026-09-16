@@ -1110,7 +1110,7 @@ class QuickItem(Object):
 
     CPP_CLASS = "QQuickItem"
 
-    def click(self, button="left"):
+    def click(self, button="left", action="click"):
         """
         Click on the :class:`QuickItem`.
 
@@ -1119,11 +1119,17 @@ class QuickItem(Object):
 
         :param button: 'left', 'right' or 'middle'. A QML scene builds its
                        own context menu from a right click.
+        :param action: 'click', or 'press' and 'release' separately. An
+                       application may show a menu from the press itself, in a
+                       nested event loop; the release that follows would then
+                       land in that menu and pick whatever entry is under the
+                       cursor.
         """
         self.client.send_command(
             "quick_item_click",
             oid=self.oid,
-            button=button
+            button=button,
+            mouseAction=action
         )
 
 

@@ -152,7 +152,7 @@ static QQuickWidget * hostingQuickWidget(QQuickWindow * window) {
  * hover-driven items expect.
  */
 void quick_mouse_click(QQuickWindow * window, const QPoint & pos,
-                       Qt::MouseButton button) {
+                       Qt::MouseButton button, bool press, bool release) {
     QObject * receiver = window;
     QPoint global_pos = window->mapToGlobal(pos);
 #ifdef QT_QUICKWIDGETS_LIB
@@ -161,15 +161,22 @@ void quick_mouse_click(QQuickWindow * window, const QPoint & pos,
         global_pos = widget->mapToGlobal(pos);
     }
 #endif
-    qApp->postEvent(receiver,
-                    new QMouseEvent(QEvent::MouseMove, pos, global_pos,
-                                    Qt::NoButton, Qt::NoButton, Qt::NoModifier));
-    qApp->postEvent(receiver,
-                    new QMouseEvent(QEvent::MouseButtonPress, pos, global_pos,
-                                    button, button, Qt::NoModifier));
-    qApp->postEvent(receiver,
-                    new QMouseEvent(QEvent::MouseButtonRelease, pos, global_pos,
-                                    button, Qt::NoButton, Qt::NoModifier));
+    if (press) {
+        qApp->postEvent(
+            receiver, new QMouseEvent(QEvent::MouseMove, pos, global_pos,
+                                      Qt::NoButton, Qt::NoButton,
+                                      Qt::NoModifier));
+        qApp->postEvent(receiver,
+                        new QMouseEvent(QEvent::MouseButtonPress, pos,
+                                        global_pos, button, button,
+                                        Qt::NoModifier));
+    }
+    if (release) {
+        qApp->postEvent(receiver,
+                        new QMouseEvent(QEvent::MouseButtonRelease, pos,
+                                        global_pos, button, Qt::NoButton,
+                                        Qt::NoModifier));
+    }
 }
 #endif
 
@@ -771,7 +778,23 @@ QtJson::JsonObject Player::quick_item_click(
             "InvalidButton",
             QString::fromUtf8("Unknown mouse button `%1`").arg(buttonName));
     }
-    quick_mouse_click(ctx.window, sPos, button);
+    // An application may show a menu from the press itself, in a nested event
+    // loop; the release that follows would then land in that menu and pick
+    // whatever entry is under the cursor. Pressing and releasing separately is
+    // what such a case needs.
+    const QString action = command["mouseAction"].toString();
+    bool press = true, release = true;
+    if (action == "press") {
+        release = false;
+    } else if (action == "release") {
+        press = false;
+    } else if (!action.isEmpty() && action != "click") {
+        return createError(
+            "InvalidAction",
+            QString::fromUtf8("Unknown action `%1`; it must be click, press or "
+                              "release").arg(action));
+    }
+    quick_mouse_click(ctx.window, sPos, button, press, release);
     QtJson::JsonObject result;
     return result;
 #else
