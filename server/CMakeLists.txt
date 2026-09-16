@@ -102,12 +102,14 @@ add_definitions(-DQT_NO_DEPRECATED_WARNINGS)
 find_package(
   ${QT}
   REQUIRED COMPONENTS Core Gui Network Widgets Test
-  OPTIONAL_COMPONENTS Quick
+  OPTIONAL_COMPONENTS Quick QuickWidgets
 )
 set(QT_VERSION "${${QT}_VERSION}")
-set(WITH_QTQUICK FALSE)
+set(WITH_QTQUICK "${${QT}Quick_FOUND}")
+set(WITH_QTQUICKWIDGETS "${${QT}QuickWidgets_FOUND}")
 message(STATUS "Building with Qt ${QT_VERSION}")
 message(STATUS "QtQuick found: ${WITH_QTQUICK}")
+message(STATUS "QtQuickWidgets found: ${WITH_QTQUICKWIDGETS}")
 
 # Add subprojects
 add_subdirectory(libFunq)

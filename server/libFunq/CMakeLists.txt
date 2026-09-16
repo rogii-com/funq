@@ -38,6 +38,7 @@ set(
   ${QT}::Widgets
   ${QT}::Test
   $<$<BOOL:${WITH_QTQUICK}>:${QT}::Quick>
+  $<$<BOOL:${WITH_QTQUICKWIDGETS}>:${QT}::QuickWidgets>
 )
 
 add_library(FunqStatic STATIC ${FUNQ_SOURCES})
