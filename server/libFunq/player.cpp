@@ -1018,6 +1018,362 @@ QtJson::JsonObject Player::model_item_action(
             QString::fromUtf8("itemaction %1 unknown").arg(itemaction));
     }
     QtJson::JsonObject result;
+    if (!resultingCheckState.isEmpty()) {
+        result["check_state"] = resultingCheckState;
+    }
+    return result;
+}
+
+/**
+ * Returns the text of an action as it reads in the menu: without the shortcut
+ * hint a menu paints on the right, and without the ampersands marking the
+ * accelerator letter.
+ */
+static QString menu_action_text(const QAction * action) {
+    QString text = action->text();
+    const int tab = text.indexOf(QLatin1Char('\t'));
+    if (tab >= 0) {
+        text.truncate(tab);
+    }
+    text.remove(QLatin1Char('&'));
+    return text.trimmed();
+}
+
+static QAction * find_menu_action(QWidget * menu, const QString & text) {
+    foreach (QAction * action, menu->actions()) {
+        if (menu_action_text(action) == text) {
+            return action;
+        }
+    }
+    foreach (QAction * action, menu->actions()) {
+        if (menu_action_text(action).compare(text, Qt::CaseInsensitive) == 0) {
+            return action;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Locates the menu a menu command addresses: the one given by oid, or the
+ * popup currently open when no oid is given - which is what a context menu is.
+ */
+QWidget * Player::locate_menu(const QtJson::JsonObject & command,
+                              QtJson::JsonObject & error) {
+    QWidget * menu = NULL;
+    if (command.contains("oid")) {
+        ObjectLocatorContext ctx(this, command, "oid");
+        if (ctx.hasError()) {
+            error = ctx.lastError;
+            return NULL;
+        }
+        menu = qobject_cast<QWidget *>(ctx.obj);
+        if (!menu) {
+            error = createError(
+                "NotAWidget",
+                QString::fromUtf8("Object (id:%1) is not a widget with actions")
+                    .arg(ctx.id));
+            return NULL;
+        }
+    } else {
+        menu = QApplication::activePopupWidget();
+        if (!menu) {
+            error = createError("NoActivePopup",
+                                "There is no popup menu open");
+            return NULL;
+        }
+    }
+    return menu;
+}
+
+QtJson::JsonObject Player::menu_actions(const QtJson::JsonObject & command) {
+    QtJson::JsonObject error;
+    QWidget * menu = locate_menu(command, error);
+    if (!menu) {
+        return error;
+    }
+
+    QMenu * asMenu = qobject_cast<QMenu *>(menu);
+    QtJson::JsonArray actions;
+    foreach (QAction * action, menu->actions()) {
+        QtJson::JsonObject item;
+        item["oid"] = registerObject(action);
+        item["text"] = menu_action_text(action);
+        item["raw_text"] = action->text();
+        item["object_name"] = action->objectName();
+        item["enabled"] = action->isEnabled();
+        item["visible"] = action->isVisible();
+        item["checkable"] = action->isCheckable();
+        item["checked"] = action->isChecked();
+        item["separator"] = action->isSeparator();
+        item["has_submenu"] = action->menu() != NULL;
+        if (action->menu()) {
+            // a submenu can be read without opening it, so a test can assert
+            // what is inside without walking the menu with the pointer
+            item["submenu_oid"] = registerObject(action->menu());
+        }
+        item["has_icon"] = !action->icon().isNull();
+        if (!action->shortcut().isEmpty()) {
+            item["shortcut"] = action->shortcut().toString();
+        }
+        if (asMenu) {
+            // where the row is painted, for a screenshot of one entry
+            const QRect rect = asMenu->actionGeometry(action);
+            const QPoint global = asMenu->mapToGlobal(rect.topLeft());
+            item["x"] = rect.x();
+            item["y"] = rect.y();
+            item["width"] = rect.width();
+            item["height"] = rect.height();
+            item["global_x"] = global.x();
+            item["global_y"] = global.y();
+        }
+        actions << item;
+    }
+
+    QtJson::JsonObject result;
+    result["menu_oid"] = registerObject(menu);
+    result["path"] = objectPath(menu);
+    result["actions"] = actions;
+    return result;
+}
+
+QtJson::JsonObject Player::menu_trigger(const QtJson::JsonObject & command) {
+    QtJson::JsonObject error;
+    QWidget * menu = locate_menu(command, error);
+    if (!menu) {
+        return error;
+    }
+
+    QStringList parts;
+    const QVariant path = command["path"];
+    if (path.userType() == QMetaType::QVariantList) {
+        foreach (const QVariant & part, path.toList()) {
+            parts << part.toString();
+        }
+    } else {
+        parts = path.toString().split("->");
+    }
+    for (int i = 0; i < parts.size(); ++i) {
+        parts[i] = parts.at(i).trimmed();
+    }
+    if (parts.isEmpty() || parts.first().isEmpty()) {
+        return createError("MissingActionPath",
+                           "No action to trigger was given");
+    }
+
+    QWidget * current = menu;
+    QAction * action = NULL;
+    for (int i = 0; i < parts.size(); ++i) {
+        action = find_menu_action(current, parts.at(i));
+        if (!action) {
+            QStringList available;
+            foreach (QAction * candidate, current->actions()) {
+                if (!candidate->isSeparator()) {
+                    available << menu_action_text(candidate);
+                }
+            }
+            return createError(
+                "MissingAction",
+                QString::fromUtf8("No action named `%1` in `%2`; it has: %3")
+                    .arg(parts.at(i))
+                    .arg(objectPath(current))
+                    .arg(available.join(", ")));
+        }
+        if (i + 1 < parts.size()) {
+            if (!action->menu()) {
+                return createError(
+                    "NotASubmenu",
+                    QString::fromUtf8("The action `%1` has no submenu")
+                        .arg(parts.at(i)));
+            }
+            current = action->menu();
+        }
+    }
+
+    if (!action->isEnabled()) {
+        return createError(
+            "ActionDisabled",
+            QString::fromUtf8("The action `%1` is disabled")
+                .arg(parts.last()));
+    }
+
+    // A menu closes itself when the user picks an entry, and code triggered by
+    // the entry often opens a dialog - which would come up behind a menu left
+    // open. Closing first keeps the application in the state a real pick
+    // leaves it in.
+    if (command["close"].isNull() || command["close"].toBool()) {
+        menu->close();
+    }
+
+    if (command["blocking"].toBool()) {
+        action->trigger();
+    } else {
+        QTimer::singleShot(0, action, SLOT(trigger()));
+    }
+
+    QtJson::JsonObject result;
+    result["oid"] = registerObject(action);
+    result["text"] = menu_action_text(action);
+    return result;
+}
+
+QtJson::JsonObject Player::object_property_object(
+    const QtJson::JsonObject & command) {
+    ObjectLocatorContext ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    const QString name = command["property"].toString();
+    const QVariant value = ctx.obj->property(name.toLatin1().constData());
+    if (!value.isValid()) {
+        return createError("MissingProperty",
+                           QString::fromUtf8("`%1` has no property `%2`")
+                               .arg(ctx.obj->metaObject()->className())
+                               .arg(name));
+    }
+    QObject * object = value.value<QObject *>();
+    if (!object) {
+        return createError(
+            "NotAnObjectProperty",
+            QString::fromUtf8("The property `%1` of `%2` holds no object")
+                .arg(name)
+                .arg(ctx.obj->metaObject()->className()));
+    }
+
+    QtJson::JsonObject result;
+    result["oid"] = registerObject(object);
+    dump_object(object, result, command["with_properties"].toBool());
+    return result;
+}
+
+QtJson::JsonObject Player::object_methods(const QtJson::JsonObject & command) {
+    ObjectLocatorContext ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    const bool inherited = command["inherited"].toBool();
+    const QMetaObject * metaObject = ctx.obj->metaObject();
+    const int firstMethod = inherited ? 0 : metaObject->methodOffset();
+    const int firstProperty = inherited ? 0 : metaObject->propertyOffset();
+
+    QtJson::JsonArray methods;
+    for (int i = firstMethod; i < metaObject->methodCount(); ++i) {
+        const QMetaMethod method = metaObject->method(i);
+        QtJson::JsonObject item;
+        item["name"] = QString::fromLatin1(method.name());
+        item["signature"] = QString::fromLatin1(method.methodSignature());
+        switch (method.methodType()) {
+            case QMetaMethod::Signal:
+                item["type"] = "signal";
+                break;
+            case QMetaMethod::Slot:
+                item["type"] = "slot";
+                break;
+            case QMetaMethod::Method:
+                item["type"] = "method";
+                break;
+            case QMetaMethod::Constructor:
+                item["type"] = "constructor";
+                break;
+        }
+        QStringList parameters;
+        for (int p = 0; p < method.parameterCount(); ++p) {
+            parameters << QString::fromLatin1(method.parameterTypeName(p));
+        }
+        item["parameters"] = parameters;
+        item["return_type"] = QString::fromLatin1(method.typeName());
+        item["class"] = QString::fromLatin1(method.enclosingMetaObject()->className());
+        methods << item;
+    }
+
+    QtJson::JsonArray properties;
+    for (int i = firstProperty; i < metaObject->propertyCount(); ++i) {
+        const QMetaProperty property = metaObject->property(i);
+        QtJson::JsonObject item;
+        item["name"] = QString::fromLatin1(property.name());
+        item["type"] = QString::fromLatin1(property.typeName());
+        item["writable"] = property.isWritable();
+        item["readable"] = property.isReadable();
+        if (property.hasNotifySignal()) {
+            item["notify"] =
+                QString::fromLatin1(property.notifySignal().methodSignature());
+        }
+        properties << item;
+    }
+
+    QtJson::JsonObject result;
+    dump_object(ctx.obj, result);
+    result["methods"] = methods;
+    result["properties_meta"] = properties;
+    return result;
+}
+
+QtJson::JsonObject Player::widget_context_menu(
+    const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QPoint pos = ctx.widget->rect().center();
+    if (!command["x"].isNull()) {
+        pos.setX(command["x"].toInt());
+    }
+    if (!command["y"].isNull()) {
+        pos.setY(command["y"].toInt());
+    }
+    // posted, not sent: a menu shown with exec() runs a nested event loop and
+    // sending would block this command until the menu closes
+    qApp->postEvent(ctx.widget,
+                    new QContextMenuEvent(QContextMenuEvent::Mouse, pos,
+                                          ctx.widget->mapToGlobal(pos)));
+    QtJson::JsonObject result;
+    result["x"] = pos.x();
+    result["y"] = pos.y();
+    return result;
+}
+
+QtJson::JsonObject Player::model_item_rect(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QAbstractItemModel * model = ctx.widget->model();
+    if (!model) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no associated model")
+                .arg(ctx.id));
+    }
+    QModelIndex index =
+        get_model_item(model, command["itempath"].toString(),
+                       command["row"].toInt(), command["column"].toInt());
+    if (!index.isValid()) {
+        return createError(
+            "MissingModelItem",
+            QString::fromUtf8("Unable to find an item identified by %1")
+                .arg(command["itempath"].toString()));
+    }
+    if (command["scroll"].toBool()) {
+        ctx.widget->scrollTo(index);
+    }
+
+    // the rect a real pointer needs: where the row is painted, on the screen
+    QWidget * viewport = ctx.widget->viewport();
+    const QRect rect = ctx.widget->visualRect(index);
+    const QPoint global = viewport->mapToGlobal(rect.topLeft());
+    QtJson::JsonObject result;
+    result["x"] = rect.x();
+    result["y"] = rect.y();
+    result["width"] = rect.width();
+    result["height"] = rect.height();
+    result["global_x"] = global.x();
+    result["global_y"] = global.y();
+    result["visible"] = !rect.isEmpty() && viewport->rect().intersects(rect);
+    if (QTreeView * tree = qobject_cast<QTreeView *>(ctx.widget)) {
+        result["expanded"] = tree->isExpanded(index);
+    }
+    if (QItemSelectionModel * selection = ctx.widget->selectionModel()) {
+        result["selected"] = selection->isSelected(index);
+    }
     return result;
 }
 

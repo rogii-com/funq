@@ -91,6 +91,13 @@ public slots:
     QtJson::JsonObject model(const QtJson::JsonObject & command);
     QtJson::JsonObject model_items(const QtJson::JsonObject & command);
     QtJson::JsonObject model_item_action(const QtJson::JsonObject & command);
+    QtJson::JsonObject model_item_rect(const QtJson::JsonObject & command);
+    QtJson::JsonObject menu_actions(const QtJson::JsonObject & command);
+    QtJson::JsonObject menu_trigger(const QtJson::JsonObject & command);
+    QtJson::JsonObject object_property_object(
+        const QtJson::JsonObject & command);
+    QtJson::JsonObject object_methods(const QtJson::JsonObject & command);
+    QtJson::JsonObject widget_context_menu(const QtJson::JsonObject & command);
     QtJson::JsonObject model_gitem_action(const QtJson::JsonObject & command);
     QtJson::JsonObject grab(const QtJson::JsonObject & command);
     QtJson::JsonObject widget_keyclick(const QtJson::JsonObject & command);
@@ -121,6 +128,8 @@ protected:
     }
 
 private:
+    QWidget * locate_menu(const QtJson::JsonObject & command,
+                          QtJson::JsonObject & error);
     void _object_set_properties(QObject * object, const QVariantMap & props);
     void _model_item_action(const QString &, QAbstractItemView *,
                             const QModelIndex &);

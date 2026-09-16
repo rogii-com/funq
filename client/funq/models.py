@@ -270,6 +270,22 @@ class Widget(Object):
     Allow to manipulate a QWidget or derived.
     """
 
+    def context_menu(self, x=None, y=None):
+        """
+        Ask for the context menu of the widget, as a right click does. The
+        menu opens asynchronously and is then reached with
+        :meth:`funq.client.FunqClient.active_widget` ('popup').
+
+        A right click of its own opens nothing: Qt delivers a context menu
+        event from the platform, not from the mouse event, so a synthesized
+        click never reaches contextMenuEvent().
+
+        :param x: position in the widget; its center by default.
+        :param y: position in the widget; its center by default.
+        """
+        return self.client.send_command('widget_context_menu', oid=self.oid,
+                                        x=x, y=y)
+
     def click(self, wait_for_enabled=10.0, btn='left'):
         """
         Click on the widget.
@@ -585,6 +601,64 @@ class AbstractItemView(Widget):
         """
         self._item_action(item, "edit")
 
+    def scroll_to_item(self, item):
+        """
+        Bring the specified item into view without changing the selection.
+
+        :param ModelItem item: The item to show (object retrieved from
+                               (:meth:`model`)).
+        """
+        self._item_action(item, "scrollto")
+
+    def set_item_checked(self, item, checked=True):
+        """
+        Check or uncheck the specified item, the way a click on its check
+        box does, and return the resulting check state as a string.
+
+        :param ModelItem item: The item (object retrieved from
+                               (:meth:`model`)); it must be checkable.
+        :param checked: True to check, False to uncheck.
+        """
+        data = self.client.send_command('model_item_action',
+                                        oid=self.oid,
+                                        itemaction="check" if checked
+                                        else "uncheck",
+                                        row=item.row, column=item.column,
+                                        itempath=item.itempath)
+        return data.get('check_state')
+
+    def context_menu_item(self, item):
+        """
+        Ask for the context menu of the specified item, as a right click
+        does. The menu opens asynchronously; it is then reached with
+        :meth:`funq.client.FunqClient.active_widget` ('popup').
+
+        A right click of its own opens nothing: Qt delivers a context menu
+        event from the platform, not from the mouse event, so a synthesized
+        click never reaches contextMenuEvent().
+
+        :param ModelItem item: The item (object retrieved from
+                               (:meth:`model`)).
+        """
+        self._item_action(item, "contextmenu")
+
+    def item_rect(self, item, scroll=True):
+        """
+        Returns where the specified item is painted, as a dict with the keys
+        x, y, width, height (relative to the viewport), global_x, global_y
+        (on the screen), visible (within the viewport), and, for a tree,
+        expanded and selected.
+
+        :param ModelItem item: The item (object retrieved from
+                               (:meth:`model`)).
+        :param scroll: bring the item into view first.
+        """
+        return self.client.send_command('model_item_rect',
+                                        oid=self.oid,
+                                        row=item.row, column=item.column,
+                                        itempath=item.itempath,
+                                        scroll=scroll)
+
     def click_item(self, item, origin="center", offset_x=0, offset_y=0,
                    btn="left"):
         """
@@ -739,6 +813,54 @@ class TreeView(AbstractItemView):
                                   timeout=timeout,
                                   timeout_interval=timeout_interval,
                                   wait_active=wait_active)
+
+
+class Menu(Widget):
+
+    """
+    Allow to manipulate a QMenu, a menu bar or any widget holding actions.
+
+    A context menu is the popup currently open, so it is reached with
+    :meth:`funq.client.FunqClient.active_widget`::
+
+      menu = client.active_widget('popup')
+      menu.trigger_action('Import->Polygon')
+    """
+    CPP_CLASS = 'QMenu'
+
+    def actions_list(self):
+        """
+        Returns the entries of the menu, as a list of dicts with the keys
+        text (as it reads, without the shortcut hint and the accelerator
+        ampersands), raw_text, object_name, enabled, visible, checkable,
+        checked, separator, has_submenu, has_icon, shortcut, and, for a
+        QMenu, where the entry is painted: x, y, width, height, global_x
+        and global_y.
+        """
+        data = self.client.send_command('menu_actions', oid=self.oid)
+        return data['actions']
+
+    def action_texts(self, with_separators=False):
+        """
+        Returns the texts of the entries of the menu, in the order they are
+        shown.
+
+        :param with_separators: keep an empty string for each separator.
+        """
+        return [action['text'] for action in self.actions_list()
+                if with_separators or not action['separator']]
+
+    def trigger_action(self, path, close=True, blocking=False):
+        """
+        Triggers the entry named by path, going through submenus.
+
+        :param path: the entry, as 'Import->Polygon' or ['Import', 'Polygon'].
+        :param close: close the menu first, as picking an entry does.
+        :param blocking: wait for the triggered code to return.
+        """
+        return self.client.send_command('menu_trigger', oid=self.oid,
+                                        path=path, close=close,
+                                        blocking=blocking)
 
 
 class TabBar(Widget):
