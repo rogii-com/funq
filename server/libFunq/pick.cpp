@@ -96,11 +96,25 @@ void PickFormatter::handle(QObject * object, const QPoint & pos) {
 
     QGraphicsView * view = dynamic_cast<QGraphicsView *>(object->parent());
     if (view) {
-        QGraphicsItem * item = view->itemAt(pos);
-        QObject * qitem = dynamic_cast<QObject *>(item);
-        if (item) {
+        // A scene item carries no name, so what can be written down about it is
+        // where it is: the point under the cursor in scene coordinates - the
+        // frame the application computes in - and the item's own rectangle.
+        const QPointF scenePos = view->mapToScene(pos);
+        m_stream << "SCENE POS: " << scenePos.x() << ", " << scenePos.y()
+                 << '\n';
+        const QRectF shown =
+            view->mapToScene(view->viewport()->rect()).boundingRect();
+        m_stream << "SCENE VISIBLE: " << shown.x() << ", " << shown.y() << ", "
+                 << shown.width() << " x " << shown.height() << '\n';
+        foreach (QGraphicsItem * item, view->items(pos)) {
+            QObject * qitem = dynamic_cast<QObject *>(item);
+            const QRectF rect =
+                item->mapToScene(item->boundingRect()).boundingRect();
             m_stream << "GITEM: `" << ObjectPath::graphicsItemId(item)
-                     << "` (QObject: " << (qitem != 0) << ")" << '\n';
+                     << "` (QObject: " << (qitem != 0)
+                     << ", z: " << item->zValue() << ", scene rect: " << rect.x()
+                     << ", " << rect.y() << ", " << rect.width() << " x "
+                     << rect.height() << ")" << '\n';
             if (qitem) {
                 print_object_props(qitem, m_stream);
             }

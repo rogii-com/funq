@@ -1842,6 +1842,12 @@ QtJson::JsonObject Player::graphicsitems(const QtJson::JsonObject & command) {
         }
     }
     QtJson::JsonObject result;
+    // Where a caller may click: a scene here is far larger than the viewport,
+    // and a point outside this rectangle maps to a position off the widget.
+    dump_rect(ctx.widget->mapToScene(ctx.widget->viewport()->rect())
+                  .boundingRect(),
+              "visible_scene_rect", result);
+    dump_rect(QRectF(ctx.widget->viewport()->rect()), "viewport_rect", result);
     dump_graphics_items(topLevelItems, ctx.widget, ctx.id, result);
     return result;
 }
