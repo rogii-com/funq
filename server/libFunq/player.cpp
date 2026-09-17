@@ -105,12 +105,20 @@ static QQuickWindow * resolveQuickWindow(QObject * object) {
 }
 #endif
 
+/**
+ * Posts a click to a widget.
+ *
+ * A press carries the button among the buttons held down - that is what Qt
+ * itself delivers, and what QTest sends. Leaving that field empty makes the
+ * press invisible to code that asks which buttons are down: the tools of the
+ * cross-section read `buttons()` and silently ignored every synthetic click.
+ */
 template <class T>
 void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
     QPoint global_pos = w->mapToGlobal(pos);
     qApp->postEvent(w,
                     new QMouseEvent(QEvent::MouseButtonPress, pos, global_pos,
-                                    button, Qt::NoButton, Qt::NoModifier));
+                                    button, button, Qt::NoModifier));
     qApp->postEvent(w,
                     new QMouseEvent(QEvent::MouseButtonRelease, pos, global_pos,
                                     button, Qt::NoButton, Qt::NoModifier));
@@ -119,10 +127,13 @@ void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
 template <class T>
 void mouse_dclick(T * w, const QPoint & pos) {
     mouse_click(w, pos, Qt::LeftButton);
-    qApp->postEvent(
-        w,
-        new QMouseEvent(QEvent::MouseButtonDblClick, pos, w->mapToGlobal(pos),
-                        Qt::LeftButton, Qt::NoButton, Qt::NoModifier));
+    qApp->postEvent(w, new QMouseEvent(QEvent::MouseButtonDblClick, pos,
+                                       w->mapToGlobal(pos), Qt::LeftButton,
+                                       Qt::LeftButton, Qt::NoModifier));
+    qApp->postEvent(w,
+                    new QMouseEvent(QEvent::MouseButtonRelease, pos,
+                                    w->mapToGlobal(pos), Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier));
 }
 
 #ifdef QT_QUICK_LIB
