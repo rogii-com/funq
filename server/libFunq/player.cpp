@@ -85,6 +85,8 @@ using namespace ObjectPath;
 // Qt's invokeMethod takes a fixed number of arguments; four covers the
 // signals and slots a test drives, such as toggled(itemId, checked).
 static const int gMaxInvokeArguments = 4;
+// beyond this, a listing with properties is an answer of tens of megabytes
+static const int gMaxWidgetsWithProperties = 3000;
 
 #ifdef QT_QUICK_LIB
 /**
@@ -479,6 +481,69 @@ QtJson::JsonObject Player::list_actions(const QtJson::JsonObject &) {
     return result;
 }
 
+/**
+ * Finds the widgets a caller is after, without sending the rest.
+ *
+ * Asking for the whole tree to pick a tab bar out of it costs ten thousand nodes
+ * on the wire and about ten seconds; the filter belongs on the side that already
+ * has the objects. A class matches anywhere in the inheritance chain, so
+ * `QTabBar` also answers the application's own subclass of it.
+ */
+QtJson::JsonObject Player::widgets_find(const QtJson::JsonObject & command) {
+    const QString className = command["class_name"].toString();
+    const QString objectName = command["objectname"].toString();
+    const bool visibleOnly = command["visible_only"].toBool();
+    const bool withProperties = command["with_properties"].toBool();
+    const int limit =
+        command["limit"].isNull() ? 100 : command["limit"].toInt();
+    if (className.isEmpty() && objectName.isEmpty()) {
+        return createError(
+            "MissingFilter",
+            QString::fromUtf8("Give class_name or objectname to look for"));
+    }
+    registerTopLevelObjects();
+
+    QList<QWidget *> queue = QApplication::topLevelWidgets();
+    QtJson::JsonArray items;
+    while (!queue.isEmpty() && items.size() < limit) {
+        QWidget * widget = queue.takeFirst();
+        foreach (QObject * child, widget->children()) {
+            if (QWidget * childWidget = qobject_cast<QWidget *>(child)) {
+                queue << childWidget;
+            }
+        }
+        if (visibleOnly && !widget->isVisible()) {
+            continue;
+        }
+        if (!objectName.isEmpty() &&
+            !widget->objectName().contains(objectName, Qt::CaseInsensitive)) {
+            continue;
+        }
+        if (!className.isEmpty()) {
+            bool matches = false;
+            const QMetaObject * metaObject = widget->metaObject();
+            while (metaObject) {
+                if (QString::fromLatin1(metaObject->className())
+                        .contains(className, Qt::CaseInsensitive)) {
+                    matches = true;
+                    break;
+                }
+                metaObject = metaObject->superClass();
+            }
+            if (!matches) {
+                continue;
+            }
+        }
+        QtJson::JsonObject one;
+        one["oid"] = registerObject(widget);
+        dump_object(widget, one, withProperties);
+        items << one;
+    }
+    QtJson::JsonObject result;
+    result["items"] = items;
+    return result;
+}
+
 QtJson::JsonObject Player::widget_by_path(const QtJson::JsonObject & command) {
     QString path = command["path"].toString();
     QObject * o = findObject(path);
@@ -749,6 +814,31 @@ void recursive_list_widget(QWidget * widget, QtJson::JsonObject & out,
     out[objectName(widget)] = resultWidget;
 }
 
+/**
+ * Counts the widgets of the application.
+ *
+ * Used to refuse a listing that would answer with every property of every
+ * widget: in an application of ten thousand widgets that answer is tens of
+ * megabytes built up recursively, and it takes the application down without
+ * so much as an assert - twice reproduced on StarSteer. Reading the same
+ * properties one widget at a time is fine, so the size of the single answer
+ * is what does it.
+ */
+static int countWidgets() {
+    int seen = 0;
+    QList<QWidget *> queue = QApplication::topLevelWidgets();
+    while (!queue.isEmpty()) {
+        QWidget * widget = queue.takeFirst();
+        ++seen;
+        foreach (QObject * child, widget->children()) {
+            if (QWidget * childWidget = qobject_cast<QWidget *>(child)) {
+                queue << childWidget;
+            }
+        }
+    }
+    return seen;
+}
+
 QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
     bool with_properties = command["with_properties"].toBool();
     QtJson::JsonObject result;
@@ -768,6 +858,19 @@ QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
         // its oid answers nothing while listing its parent shows the scene
         list_quick_scene(ctx.obj, result, with_properties);
     } else {
+        if (with_properties && !command["force"].toBool()) {
+            const int count = countWidgets();
+            if (count > gMaxWidgetsWithProperties) {
+                return createError(
+                    "TooManyWidgets",
+                    QString::fromUtf8(
+                        "Listing all %1 widgets with their properties is what "
+                        "brings the application down; ask for a subtree by "
+                        "`oid`, drop `with_properties`, or pass `force` to "
+                        "insist")
+                        .arg(count));
+            }
+        }
         registerTopLevelObjects();
         QList<QWidget *> widgets = QApplication::topLevelWidgets();
         if (!widgets.isEmpty()) {
