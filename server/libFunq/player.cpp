@@ -1935,18 +1935,91 @@ DelayedResponse * Player::shortcut(const QtJson::JsonObject & command) {
     return new ShortcutResponse(this, command);
 }
 
+/**
+ * Describes one tab: where it is, and whether it can be clicked.
+ *
+ * The rectangle comes in two coordinate systems. The local one is what Qt
+ * itself uses, the global one is where the tab sits on the screen - and a
+ * caller that has to click a tab with the real mouse needs the second one.
+ * Some products only accept activation from a genuinely pressed button, and
+ * then a synthetic click is not enough.
+ */
+static QtJson::JsonObject dump_tab(const QTabBar * bar, int index) {
+    QtJson::JsonObject one;
+    one["index"] = index;
+    one["text"] = bar->tabText(index);
+    one["enabled"] = bar->isTabEnabled(index);
+    one["current"] = index == bar->currentIndex();
+    const QRect rect = bar->tabRect(index);
+    dump_rect(rect, "rect", one);
+    dump_rect(QRect(bar->mapToGlobal(rect.topLeft()), rect.size()),
+              "global_rect", one);
+    return one;
+}
+
+/**
+ * Resolves the tab a command asks for, by index or by a part of its text.
+ */
+static int find_tab(const QTabBar * bar, const QtJson::JsonObject & command) {
+    if (!command["index"].isNull()) {
+        return command["index"].toInt();
+    }
+    const QString text = command["text"].toString();
+    if (text.isEmpty()) {
+        return -1;
+    }
+    for (int i = 0; i < bar->count(); ++i) {
+        if (bar->tabText(i).contains(text, Qt::CaseInsensitive)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 QtJson::JsonObject Player::tabbar_list(const QtJson::JsonObject & command) {
     WidgetLocatorContext<QTabBar> ctx(this, command, "oid");
     if (ctx.hasError()) {
         return ctx.lastError;
     }
     QStringList texts;
+    QtJson::JsonArray tabs;
     for (int i = 0; i < ctx.widget->count(); ++i) {
         texts << ctx.widget->tabText(i);
+        tabs << dump_tab(ctx.widget, i);
     }
     QtJson::JsonObject result;
     result["tabtexts"] = texts;
+    result["tabs"] = tabs;
+    result["current"] = ctx.widget->currentIndex();
     return result;
+}
+
+QtJson::JsonObject Player::tabbar_click(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QTabBar> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    const int index = find_tab(ctx.widget, command);
+    if (index < 0 || index >= ctx.widget->count()) {
+        return createError(
+            "InvalidTab",
+            QString::fromUtf8("The tab bar (id:%1) has no tab %2 among its %3")
+                .arg(ctx.id)
+                .arg(command["index"].isNull() ? command["text"].toString()
+                                               : command["index"].toString())
+                .arg(ctx.widget->count()));
+    }
+    const QRect rect = ctx.widget->tabRect(index);
+    if (rect.isEmpty()) {
+        return createError(
+            "TabNotVisible",
+            QString::fromUtf8("Tab %1 of the tab bar (id:%2) has no place on "
+                              "screen; scroll it into view first")
+                .arg(index)
+                .arg(ctx.id));
+    }
+    mouse_click(ctx.widget, rect.center(), Qt::LeftButton);
+    return dump_tab(ctx.widget, index);
 }
 
 QtJson::JsonObject Player::headerview_list(const QtJson::JsonObject & command) {
