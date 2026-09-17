@@ -36,6 +36,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include "dragndropresponse.h"
 #include "objectpath.h"
+#include "delayedresponse.h"
 #include "shortcutresponse.h"
 
 #include <QAbstractItemModel>
@@ -53,6 +54,8 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QMenu>
 #include <QMetaMethod>
 #include <QMouseEvent>
+#include <QElapsedTimer>
+#include <QPointer>
 #include <QSet>
 #include <QStringList>
 #include <QTableView>
@@ -1639,6 +1642,36 @@ QtJson::JsonObject Player::model_gitem_action(
     return result;
 }
 
+/**
+ * Tells whether a widget can be grabbed at all.
+ *
+ * A widget of no size makes the render-to-texture path assert, and one that
+ * was never shown answers an empty image that reaches the caller as empty
+ * data and fails far from here. Both are worth an error that says so.
+ */
+static QString grabRefusalReason(QWidget * widget) {
+    if (!widget->isVisible()) {
+        return QString::fromUtf8("it is not visible");
+    }
+    if (widget->size().isEmpty()) {
+        return QString::fromUtf8("its size is %1x%2")
+            .arg(widget->width())
+            .arg(widget->height());
+    }
+    return QString();
+}
+
+static QtJson::JsonObject encodePixmap(const QPixmap & pixmap,
+                                       const QString & wanted) {
+    QString format = wanted.isEmpty() ? QString("PNG") : wanted;
+    QBuffer buffer;
+    pixmap.save(&buffer, "PNG");
+    QtJson::JsonObject result;
+    result["format"] = format;
+    result["data"] = buffer.data().toBase64();
+    return result;
+}
+
 QtJson::JsonObject Player::grab(const QtJson::JsonObject & command) {
     QPixmap pixmap;
     if (command.contains("oid")) {
@@ -1646,6 +1679,14 @@ QtJson::JsonObject Player::grab(const QtJson::JsonObject & command) {
         WidgetLocatorContext<QWidget> ctx(this, command, "oid");
         if (ctx.hasError()) {
             return ctx.lastError;
+        }
+        const QString refusal = grabRefusalReason(ctx.widget);
+        if (!refusal.isEmpty()) {
+            return createError(
+                "WidgetNotGrabbable",
+                QString::fromUtf8("The widget (id:%1) cannot be grabbed: %2")
+                    .arg(ctx.id)
+                    .arg(refusal));
         }
 #if QT_VERSION_MAJOR >= 6
         pixmap = ctx.widget->grab();
@@ -1662,18 +1703,103 @@ QtJson::JsonObject Player::grab(const QtJson::JsonObject & command) {
         pixmap = QPixmap::grabWindow(QApplication::desktop()->winId());
 #endif
     }
-    QString format = command["format"].toString();
-    if (format.isEmpty()) {
-        format = "PNG";
+    return encodePixmap(pixmap, command["format"].toString());
+}
+
+namespace {
+/**
+ * Answers with a grab taken once the widget stopped changing.
+ *
+ * A scene is repainted a frame or two after whatever caused it - a layout
+ * pass, a deferred update, a debounced map tile - and a grab taken in
+ * between reads a framebuffer that was just cleared to the background. There
+ * is no signal to wait for that every widget has, so the picture itself is
+ * the signal: the same image twice in a row means the drawing has stopped.
+ */
+class SettledGrabResponse : public DelayedResponse {
+public:
+    SettledGrabResponse(Player * player, const QtJson::JsonObject & command,
+                        QWidget * widget, int quiet, int stable, int deadline,
+                        const QtJson::JsonObject & failure = QtJson::JsonObject())
+        : DelayedResponse(player, command, quiet, deadline + 2 * quiet + 1000),
+          m_player(player),
+          m_widget(widget),
+          m_format(command["format"].toString()),
+          m_failure(failure),
+          m_stable(stable < 2 ? 2 : stable),
+          m_deadline(deadline),
+          m_repeats(1) {
+        m_elapsed.start();
     }
 
-    QBuffer buffer;
-    pixmap.save(&buffer, "PNG");
+protected:
+    void execute(int) override {
+        if (!m_failure.isEmpty()) {
+            writeResponse(m_failure);
+            return;
+        }
+        if (m_widget.isNull()) {
+            writeResponse(m_player->createError(
+                "WidgetNotGrabbable",
+                QString::fromUtf8("The widget is gone")));
+            return;
+        }
+        const QString refusal = grabRefusalReason(m_widget);
+        if (!refusal.isEmpty()) {
+            writeResponse(m_player->createError(
+                "WidgetNotGrabbable",
+                QString::fromUtf8("The widget cannot be grabbed: %1")
+                    .arg(refusal)));
+            return;
+        }
+        const QPixmap pixmap = m_widget->grab();
+        const QImage shot = pixmap.toImage();
+        m_repeats = (!m_previous.isNull() && shot == m_previous) ? m_repeats + 1
+                                                                 : 1;
+        m_previous = shot;
 
-    QtJson::JsonObject result;
-    result["format"] = format;
-    result["data"] = buffer.data().toBase64();
-    return result;
+        const bool settled = m_repeats >= m_stable;
+        if (!settled && m_elapsed.elapsed() < m_deadline) {
+            return;
+        }
+        QtJson::JsonObject result = encodePixmap(pixmap, m_format);
+        result["settled"] = settled;
+        result["waited_ms"] = static_cast<int>(m_elapsed.elapsed());
+        writeResponse(result);
+    }
+
+private:
+    Player * m_player;
+    QPointer<QWidget> m_widget;
+    QString m_format;
+    QtJson::JsonObject m_failure;
+    QImage m_previous;
+    QElapsedTimer m_elapsed;
+    int m_stable;
+    int m_deadline;
+    int m_repeats;
+};
+}  // namespace
+
+DelayedResponse * Player::grab_settled(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        // the slot signature fixes the shape of the answer, so the error
+        // travels as a response that answers on its first turn
+        return new SettledGrabResponse(this, command, NULL, 0, 2, 0,
+                                       ctx.lastError);
+    }
+    const int quiet = command["quiet_ms"].isNull()
+                          ? 200
+                          : command["quiet_ms"].toInt();
+    const int stable = command["stable_frames"].isNull()
+                           ? 2
+                           : command["stable_frames"].toInt();
+    const int deadline = command["timeout_ms"].isNull()
+                             ? 5000
+                             : command["timeout_ms"].toInt();
+    return new SettledGrabResponse(this, command, ctx.widget, quiet, stable,
+                                   deadline);
 }
 
 QtJson::JsonObject Player::widget_keyclick(const QtJson::JsonObject & command) {
