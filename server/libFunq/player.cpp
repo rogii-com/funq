@@ -168,10 +168,16 @@ static bool platform_mouse(QWidget * widget, const QPoint & pos,
  * itself delivers, and what QTest sends. Leaving that field empty makes the
  * press invisible to code that asks which buttons are down: the tools of the
  * cross-section read `buttons()` and silently ignored every synthetic click.
+ *
+ * direct asks for the old delivery, straight to the widget. The platform route
+ * runs hit testing, so it reaches whatever is drawn at that point rather than
+ * the widget a caller named; a caller who means the named widget - covered by
+ * another, or off screen - says direct and gets it.
  */
 template <class T>
-void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
-    if (QWidget * widget = qobject_cast<QWidget *>(w)) {
+void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button,
+                 bool direct = false) {
+    if (QWidget * widget = direct ? NULL : qobject_cast<QWidget *>(w)) {
         if (platform_mouse(widget, pos, button, button,
                            QEvent::MouseButtonPress)) {
             platform_mouse(widget, pos, button, Qt::NoButton,
@@ -189,9 +195,9 @@ void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
 }
 
 template <class T>
-void mouse_dclick(T * w, const QPoint & pos) {
-    mouse_click(w, pos, Qt::LeftButton);
-    if (QWidget * widget = qobject_cast<QWidget *>(w)) {
+void mouse_dclick(T * w, const QPoint & pos, bool direct = false) {
+    mouse_click(w, pos, Qt::LeftButton, direct);
+    if (QWidget * widget = direct ? NULL : qobject_cast<QWidget *>(w)) {
         if (platform_mouse(widget, pos, Qt::LeftButton, Qt::LeftButton,
                            QEvent::MouseButtonDblClick)) {
             platform_mouse(widget, pos, Qt::LeftButton, Qt::NoButton,
@@ -1202,15 +1208,16 @@ QtJson::JsonObject Player::widget_click(const QtJson::JsonObject & command) {
         return ctx.lastError;
     }
     QString action = command["mouseAction"].toString();
+    const bool direct = command["direct"].toBool();
     QPoint pos = ctx.widget->rect().center();
     if (action == "doubleclick") {
-        mouse_dclick(ctx.widget, pos);
+        mouse_dclick(ctx.widget, pos, direct);
     } else if (action == "rightclick") {
-        mouse_click(ctx.widget, pos, Qt::RightButton);
+        mouse_click(ctx.widget, pos, Qt::RightButton, direct);
     } else if (action == "middleclick") {
-        mouse_click(ctx.widget, pos, Qt::MiddleButton);
+        mouse_click(ctx.widget, pos, Qt::MiddleButton, direct);
     } else {
-        mouse_click(ctx.widget, pos, Qt::LeftButton);
+        mouse_click(ctx.widget, pos, Qt::LeftButton, direct);
     }
     QtJson::JsonObject result;
     return result;
@@ -1438,6 +1445,7 @@ QtJson::JsonObject Player::model_item_action(
     }
     ctx.widget->scrollTo(index);  // item visible
     QString itemaction = command["itemaction"].toString();
+    const bool direct = command["direct"].toBool();
 
     QPoint cursorPosition;
 
@@ -1527,13 +1535,16 @@ QtJson::JsonObject Player::model_item_action(
                                       QContextMenuEvent::Mouse, cursorPosition,
                                       viewport->mapToGlobal(cursorPosition)));
     } else if (itemaction == "click") {
-        mouse_click(ctx.widget->viewport(), cursorPosition, Qt::LeftButton);
+        mouse_click(ctx.widget->viewport(), cursorPosition,
+                    Qt::LeftButton, direct);
     } else if (itemaction == "rightclick") {
-        mouse_click(ctx.widget->viewport(), cursorPosition, Qt::RightButton);
+        mouse_click(ctx.widget->viewport(), cursorPosition,
+                    Qt::RightButton, direct);
     } else if (itemaction == "middleclick") {
-        mouse_click(ctx.widget->viewport(), cursorPosition, Qt::MiddleButton);
+        mouse_click(ctx.widget->viewport(), cursorPosition,
+                    Qt::MiddleButton, direct);
     } else if (itemaction == "doubleclick") {
-        mouse_dclick(ctx.widget->viewport(), cursorPosition);
+        mouse_dclick(ctx.widget->viewport(), cursorPosition, direct);
     } else {
         return createError(
             "MissingItemAction",
@@ -2556,6 +2567,7 @@ QtJson::JsonObject Player::model_gitem_action(
         ctx.widget->ensureVisible(item);
     }
     QString itemaction = command["itemaction"].toString();
+    const bool direct = command["direct"].toBool();
 
     // The centre of the bounding rectangle is not on the item when the item is
     // a long polyline - a horizon crossing the section has its centre in empty
@@ -2575,17 +2587,20 @@ QtJson::JsonObject Player::model_gitem_action(
             ctx.widget->scene()->mouseGrabberItem()->ungrabMouse();
         }
         if (itemaction == "rightclick") {
-            mouse_click(ctx.widget->viewport(), viewPos, Qt::RightButton);
+            mouse_click(ctx.widget->viewport(), viewPos,
+                        Qt::RightButton, direct);
         } else if (itemaction == "middleclick") {
-            mouse_click(ctx.widget->viewport(), viewPos, Qt::MiddleButton);
+            mouse_click(ctx.widget->viewport(), viewPos,
+                        Qt::MiddleButton, direct);
         } else {
-            mouse_click(ctx.widget->viewport(), viewPos, Qt::LeftButton);
+            mouse_click(ctx.widget->viewport(), viewPos,
+                        Qt::LeftButton, direct);
         }
     } else if (itemaction == "doubleclick") {
         if (ctx.widget->scene() && ctx.widget->scene()->mouseGrabberItem()) {
             ctx.widget->scene()->mouseGrabberItem()->ungrabMouse();
         }
-        mouse_dclick(ctx.widget->viewport(), viewPos);
+        mouse_dclick(ctx.widget->viewport(), viewPos, direct);
     } else {
         return createError(
             "MissingItemAction",
@@ -2883,7 +2898,8 @@ QtJson::JsonObject Player::tabbar_click(const QtJson::JsonObject & command) {
                 .arg(index)
                 .arg(ctx.id));
     }
-    mouse_click(ctx.widget, rect.center(), Qt::LeftButton);
+    mouse_click(ctx.widget, rect.center(), Qt::LeftButton,
+                command["direct"].toBool());
     return dump_tab(ctx.widget, index);
 }
 
@@ -2970,7 +2986,8 @@ QtJson::JsonObject Player::headerview_click(
         mousePos.setX(ctx.widget->width() / 2);
         mousePos.setY(pos + ctx.widget->offset() + 5);
     }
-    mouse_click(ctx.widget->viewport(), mousePos, Qt::LeftButton);
+    mouse_click(ctx.widget->viewport(), mousePos, Qt::LeftButton,
+                command["direct"].toBool());
     QtJson::JsonObject result;
     return result;
 }
