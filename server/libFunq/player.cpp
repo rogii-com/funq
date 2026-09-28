@@ -33,6 +33,12 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 */
 
 #include "player.h"
+#include <QDateTime>
+#include "qtsyntheticinput.h"
+
+#include <QKeyEvent>
+
+#include <cmath>
 
 #include <QIcon>
 #include <QStyle>
@@ -117,7 +123,46 @@ static QQuickWindow * resolveQuickWindow(QObject * object) {
 #endif
 
 /**
- * Posts a click to a widget.
+ * A stamp for synthetic input, growing as a clock does.
+ *
+ * Qt tells a double click from two clicks by the gap between their stamps, and
+ * decides a drag started by comparing them, so a constant would turn every
+ * pair of clicks into one gesture.
+ */
+static int input_stamp() {
+    return int(QDateTime::currentMSecsSinceEpoch() & 0x7fffffff);
+}
+
+/**
+ * Delivers a mouse event the way the platform does.
+ *
+ * Posting straight to a widget skips hit testing, z-order and grabs, and -
+ * what matters most here - never updates the state QGuiApplication keeps about
+ * the mouse. An application that asks `qApp->mouseButtons()` before believing a
+ * click then sees no button held: StarSteer gates window activation on exactly
+ * that, so a synthetic click on a tab switched the tab and left the product
+ * thinking the old window was still the active one.
+ *
+ * Returns false when the widget has no window behind it - an offscreen scene,
+ * for one - and the caller falls back to posting.
+ */
+static bool platform_mouse(QWidget * widget, const QPoint & pos,
+                           Qt::MouseButton button, Qt::MouseButtons state,
+                           QEvent::Type type) {
+    QWidget * top = widget->window();
+    QWindow * handle = top ? top->windowHandle() : NULL;
+    if (!handle) {
+        return false;
+    }
+    const QPointF inWindow = widget->mapTo(top, pos);
+    const QPointF global = widget->mapToGlobal(pos);
+    qt_handleMouseEvent(handle, inWindow, global, state, button, type,
+                        Qt::NoModifier, input_stamp());
+    return true;
+}
+
+/**
+ * Sends a click to a widget, through the platform when there is a window.
  *
  * A press carries the button among the buttons held down - that is what Qt
  * itself delivers, and what QTest sends. Leaving that field empty makes the
@@ -126,6 +171,14 @@ static QQuickWindow * resolveQuickWindow(QObject * object) {
  */
 template <class T>
 void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
+    if (QWidget * widget = qobject_cast<QWidget *>(w)) {
+        if (platform_mouse(widget, pos, button, button,
+                           QEvent::MouseButtonPress)) {
+            platform_mouse(widget, pos, button, Qt::NoButton,
+                           QEvent::MouseButtonRelease);
+            return;
+        }
+    }
     QPoint global_pos = w->mapToGlobal(pos);
     qApp->postEvent(w,
                     new QMouseEvent(QEvent::MouseButtonPress, pos, global_pos,
@@ -138,6 +191,14 @@ void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button) {
 template <class T>
 void mouse_dclick(T * w, const QPoint & pos) {
     mouse_click(w, pos, Qt::LeftButton);
+    if (QWidget * widget = qobject_cast<QWidget *>(w)) {
+        if (platform_mouse(widget, pos, Qt::LeftButton, Qt::LeftButton,
+                           QEvent::MouseButtonDblClick)) {
+            platform_mouse(widget, pos, Qt::LeftButton, Qt::NoButton,
+                           QEvent::MouseButtonRelease);
+            return;
+        }
+    }
     qApp->postEvent(w, new QMouseEvent(QEvent::MouseButtonDblClick, pos,
                                        w->mapToGlobal(pos), Qt::LeftButton,
                                        Qt::LeftButton, Qt::NoModifier));
@@ -1810,6 +1871,549 @@ QtJson::JsonObject Player::widget_context_menu(
  * The row must be on screen, so pass scroll to bring it there. Selection and
  * hover repaint the background, so compare rows that are in the same state.
  */
+/**
+ * How many cells one answer may carry when the caller named no limit.
+ *
+ * A log spreadsheet holds thousands of rows, and asking for all of them at
+ * once has already killed the application once: the answer, not the reading,
+ * is what breaks. A caller who wants everything says so page by page.
+ */
+static const int gMaxTableCells = 100000;
+
+/**
+ * The value of a cell, kept as the type it is.
+ *
+ * A table compares against numbers, so a number must stay a number: turning
+ * 301.0 into "301" loses both the type and the precision the application
+ * keeps for tests in its unformatted role.
+ */
+static QVariant cell_value(const QVariant & value) {
+    if (!value.isValid()) {
+        return QVariant();
+    }
+    switch (value.userType()) {
+        case QMetaType::Bool:
+        case QMetaType::Int:
+        case QMetaType::UInt:
+        case QMetaType::LongLong:
+        case QMetaType::ULongLong:
+        case QMetaType::Double:
+        case QMetaType::Float: {
+            const double number = value.toDouble();
+            // JSON не знает NaN, а сериализатор от него обрывает связь и уносит с
+            // собой весь ответ. Пустая ячейка и приходит пустой - так её отдаёт и
+            // тест-канал самого приложения
+            if (!std::isfinite(number)) {
+                return QVariant();
+            }
+            return value;
+        }
+        default:
+            break;
+    }
+    return describe_role_value(value, false);
+}
+
+/**
+ * Finds the view a command asks for: by oid, by widget path or by object name.
+ */
+QAbstractItemView * Player::find_view(const QtJson::JsonObject & command,
+                                      QtJson::JsonObject & error) {
+    QObject * object = NULL;
+    if (!command["oid"].isNull()) {
+        ObjectLocatorContext ctx(this, command, "oid");
+        if (ctx.hasError()) {
+            error = ctx.lastError;
+            return NULL;
+        }
+        object = ctx.obj;
+    } else if (!command["path"].toString().isEmpty()) {
+        const QString path = command["path"].toString();
+        object = findObject(path);
+        if (!object) {
+            error = createError(
+                "InvalidWidgetPath",
+                QString::fromUtf8("Unable to find widget with path `%1`")
+                    .arg(path));
+            return NULL;
+        }
+    } else if (!command["objectname"].toString().isEmpty()) {
+        const QString name = command["objectname"].toString();
+        registerTopLevelObjects();
+        QList<QWidget *> queue = QApplication::topLevelWidgets();
+        QList<QAbstractItemView *> found;
+        while (!queue.isEmpty()) {
+            QWidget * widget = queue.takeFirst();
+            foreach (QObject * child, widget->children()) {
+                if (QWidget * childWidget = qobject_cast<QWidget *>(child)) {
+                    queue << childWidget;
+                }
+            }
+            QAbstractItemView * view = qobject_cast<QAbstractItemView *>(widget);
+            if (view && view->objectName() == name && view->isVisible()) {
+                found << view;
+            }
+        }
+        if (found.isEmpty()) {
+            error = createError(
+                "InvalidWidgetPath",
+                QString::fromUtf8("No visible item view is named `%1`")
+                    .arg(name));
+            return NULL;
+        }
+        if (found.size() > 1) {
+            error = createError(
+                "AmbiguousWidgetName",
+                QString::fromUtf8("%1 visible item views are named `%2`; "
+                                  "address one by oid or by path")
+                    .arg(found.size())
+                    .arg(name));
+            return NULL;
+        }
+        object = found.first();
+    } else {
+        error = createError(
+            "MissingWidget",
+            QString::fromUtf8("Name the view by oid, path or objectname"));
+        return NULL;
+    }
+
+    QAbstractItemView * view = qobject_cast<QAbstractItemView *>(object);
+    if (!view) {
+        error = createError(
+            "NotAWidget",
+            QString::fromUtf8("Object `%1` is not an item view")
+                .arg(object->objectName()));
+        return NULL;
+    }
+    return view;
+}
+
+/**
+ * Dumps a table the way its own screen shows it: values and nothing else.
+ *
+ * model_items describes every cell - its path, its model, its row - which is
+ * what an action on an item needs and what a table dump does not: a log
+ * spreadsheet of six thousand rows turns into megabytes and the application
+ * dies delivering them. Here a row is a list of values, and that is all.
+ *
+ * Rows and columns the view hides stay out by default, which is what the
+ * application's own test channel does. role picks what to read - the display
+ * text by default, or a role the application fills for tests with the raw
+ * value. first_row and max_rows walk a large table page by page.
+ */
+/**
+ * Sends a key to a widget and lets it handle the key before returning.
+ *
+ * Typing into a cell editor is a sequence - clear, type, confirm - and each
+ * step must land before the next one is sent, or the delegate closes the
+ * editor midway through.
+ */
+static void send_key(QWidget * widget, int key, Qt::KeyboardModifiers modifiers,
+                     const QString & text) {
+    QKeyEvent press(QEvent::KeyPress, key, modifiers, text);
+    qApp->sendEvent(widget, &press);
+    QKeyEvent release(QEvent::KeyRelease, key, modifiers, text);
+    qApp->sendEvent(widget, &release);
+}
+
+/**
+ * Writes a value straight into the model.
+ *
+ * This is the short way: no editor, no keyboard, no window in front. It skips
+ * the delegate, so it cannot show that the application refuses a bad value -
+ * for that, type it. The application's own test channel writes the same way.
+ */
+QtJson::JsonObject Player::model_item_set(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QAbstractItemModel * model = ctx.widget->model();
+    if (!model) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no associated model")
+                .arg(ctx.id));
+    }
+    QModelIndex index =
+        get_model_item(model, command["itempath"].toString(),
+                       command["row"].toInt(), command["column"].toInt());
+    if (!index.isValid()) {
+        return createError(
+            "MissingModelItem",
+            QString::fromUtf8("Unable to find an item identified by %1")
+                .arg(command["itempath"].toString()));
+    }
+    const int role = command["role"].isNull() ? int(Qt::EditRole)
+                                              : command["role"].toInt();
+    if (!model->setData(index, command["value"], role)) {
+        return createError(
+            "SetDataRefused",
+            QString::fromUtf8("The model refused the value for row %1, "
+                              "column %2 in role %3")
+                .arg(index.row())
+                .arg(index.column())
+                .arg(role));
+    }
+    QtJson::JsonObject result;
+    result["value"] = cell_value(model->data(index, role));
+    result["display"] = cell_value(model->data(index, Qt::DisplayRole));
+    return result;
+}
+
+/**
+ * Types into a cell the way a person does.
+ *
+ * Opens the editor the view itself opens, clears what was there, sends the
+ * text key by key and confirms with Return - so the delegate, the validator
+ * and every check the application puts on input are on the way. Unlike the
+ * pointer-driven path it needs neither a maximized window nor a real mouse.
+ *
+ * commit=false leaves with Escape, which is how a test shows that a refused
+ * value changes nothing.
+ */
+QtJson::JsonObject Player::model_item_type(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QAbstractItemModel * model = ctx.widget->model();
+    if (!model) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no associated model")
+                .arg(ctx.id));
+    }
+    QModelIndex index =
+        get_model_item(model, command["itempath"].toString(),
+                       command["row"].toInt(), command["column"].toInt());
+    if (!index.isValid()) {
+        return createError(
+            "MissingModelItem",
+            QString::fromUtf8("Unable to find an item identified by %1")
+                .arg(command["itempath"].toString()));
+    }
+    if (!(model->flags(index) & Qt::ItemIsEditable)) {
+        return createError(
+            "ItemNotEditable",
+            QString::fromUtf8("Row %1, column %2 is not editable")
+                .arg(index.row())
+                .arg(index.column()));
+    }
+
+    ctx.widget->scrollTo(index);
+    ctx.widget->setCurrentIndex(index);
+    ctx.widget->edit(index);
+    QWidget * editor = QApplication::focusWidget();
+    if (!editor || !ctx.widget->isAncestorOf(editor)) {
+        return createError(
+            "EditorNotOpened",
+            QString::fromUtf8("The view opened no editor for row %1, column %2")
+                .arg(index.row())
+                .arg(index.column()));
+    }
+
+    const bool clear = command["clear"].isNull() ? true
+                                                 : command["clear"].toBool();
+    // редактор ячейки принимает набор так же, как любое поле: через платформу.
+    // Отправка события прямо ему не доходит до делегата, а запись свойства
+    // продукт за ввод не считает
+    QWidget * top = editor->window();
+    QWindow * handle = top ? top->windowHandle() : NULL;
+    const bool platform = handle != NULL && !command["direct"].toBool();
+    if (platform) {
+        editor->activateWindow();
+        editor->setFocus(Qt::MouseFocusReason);
+    }
+    if (clear) {
+        if (platform) {
+            qt_handleKeyEvent(handle, QEvent::KeyPress, Qt::Key_A,
+                              Qt::ControlModifier, "a", false, 1);
+            qt_handleKeyEvent(handle, QEvent::KeyRelease, Qt::Key_A,
+                              Qt::ControlModifier, "a", false, 1);
+            qt_handleKeyEvent(handle, QEvent::KeyPress, Qt::Key_Delete,
+                              Qt::NoModifier, QString(), false, 1);
+            qt_handleKeyEvent(handle, QEvent::KeyRelease, Qt::Key_Delete,
+                              Qt::NoModifier, QString(), false, 1);
+        } else {
+            send_key(editor, Qt::Key_A, Qt::ControlModifier, "a");
+            send_key(editor, Qt::Key_Delete, Qt::NoModifier, QString());
+        }
+    }
+    const QString text = command["text"].toString();
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar character = text.at(i);
+        if (platform) {
+            qt_handleKeyEvent(handle, QEvent::KeyPress, character.unicode(),
+                              Qt::NoModifier, QString(character), false, 1);
+            qt_handleKeyEvent(handle, QEvent::KeyRelease, character.unicode(),
+                              Qt::NoModifier, QString(character), false, 1);
+            continue;
+        }
+        send_key(editor, character.unicode(), Qt::NoModifier,
+                 QString(character));
+    }
+
+    // некоторые поля продукта набор с клавиатуры не принимают - у них свой
+    // обработчик ввода или валидатор, отвергающий незаконченное число. Тогда
+    // кладём текст прямо в редактор: делегат всё равно заберёт его оттуда, и
+    // проверка значения при подтверждении остаётся на месте
+    QString entered = editor->property("text").toString();
+    bool byProperty = false;
+    if (entered != text && editor->metaObject()->indexOfProperty("text") >= 0) {
+        byProperty = editor->setProperty("text", text);
+        entered = editor->property("text").toString();
+    }
+    const bool commit = command["commit"].isNull() ? true
+                                                   : command["commit"].toBool();
+    const int finish = commit ? Qt::Key_Return : Qt::Key_Escape;
+    if (platform) {
+        qt_handleKeyEvent(handle, QEvent::KeyPress, finish, Qt::NoModifier,
+                          QString(), false, 1);
+        qt_handleKeyEvent(handle, QEvent::KeyRelease, finish, Qt::NoModifier,
+                          QString(), false, 1);
+    } else {
+        send_key(editor, finish, Qt::NoModifier, QString());
+    }
+
+    QtJson::JsonObject result;
+    result["editor"] = QString::fromLatin1(editor->metaObject()->className());
+    result["editor_text"] = entered;
+    result["typed_by"] = byProperty ? QString("property") : QString("keys");
+    result["row"] = index.row();
+    result["column"] = index.column();
+    result["value"] = cell_value(model->data(index, Qt::EditRole));
+    result["display"] = cell_value(model->data(index, Qt::DisplayRole));
+    return result;
+}
+
+/**
+ * Selects a rectangle of cells.
+ *
+ * Copy, paste and delete work on a selection, and the shortcuts that trigger
+ * them are already deliverable - what was missing is saying which cells they
+ * act on. mode is one of select, toggle, clear or replace.
+ */
+QtJson::JsonObject Player::model_select_range(
+    const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QAbstractItemModel * model = ctx.widget->model();
+    QItemSelectionModel * selection = ctx.widget->selectionModel();
+    if (!model || !selection) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no model to select in")
+                .arg(ctx.id));
+    }
+    const int top = qMax(0, command["top"].toInt());
+    const int left = qMax(0, command["left"].toInt());
+    const int bottom = command["bottom"].isNull() ? top
+                                                  : command["bottom"].toInt();
+    const int right = command["right"].isNull() ? left
+                                                : command["right"].toInt();
+    const QModelIndex topLeft = model->index(top, left);
+    const QModelIndex bottomRight = model->index(bottom, right);
+    if (!topLeft.isValid() || !bottomRight.isValid()) {
+        return createError(
+            "MissingModelItem",
+            QString::fromUtf8("The table has %1 rows by %2 columns; "
+                              "(%3,%4)-(%5,%6) is outside it")
+                .arg(model->rowCount())
+                .arg(model->columnCount())
+                .arg(top)
+                .arg(left)
+                .arg(bottom)
+                .arg(right));
+    }
+
+    const QString mode = command["mode"].toString();
+    QItemSelectionModel::SelectionFlags flags =
+        QItemSelectionModel::ClearAndSelect;
+    if (mode == "select") {
+        flags = QItemSelectionModel::Select;
+    } else if (mode == "toggle") {
+        flags = QItemSelectionModel::Toggle;
+    } else if (mode == "clear") {
+        flags = QItemSelectionModel::Deselect;
+    }
+    ctx.widget->scrollTo(topLeft);
+    selection->select(QItemSelection(topLeft, bottomRight), flags);
+    selection->setCurrentIndex(topLeft, QItemSelectionModel::NoUpdate);
+
+    QtJson::JsonObject result;
+    result["selected_cells"] = selection->selectedIndexes().size();
+    return result;
+}
+
+/**
+ * The window a widget lives in.
+ *
+ * windows_list answers the windows of the application, and a dialog made of
+ * widgets is not among them: it skips every window that a top-level widget
+ * stands behind. Guessing the window by cutting the widget path is worse still
+ * - Qt already knows the answer.
+ */
+QtJson::JsonObject Player::widget_window(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QWidget * window = ctx.widget->window();
+    if (!window) {
+        return createError(
+            "MissingWidget",
+            QString::fromUtf8("The widget (id:%1) belongs to no window")
+                .arg(ctx.id));
+    }
+    QtJson::JsonObject result;
+    result["oid"] = registerObject(window);
+    dump_object(window, result);
+    return result;
+}
+
+QtJson::JsonObject Player::table_dump(const QtJson::JsonObject & command) {
+    QtJson::JsonObject error;
+    QAbstractItemView * view = find_view(command, error);
+    if (!view) {
+        return error;
+    }
+    QAbstractItemModel * model = view->model();
+    if (!model) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view `%1` has no associated model")
+                .arg(view->objectName()));
+    }
+
+    const bool visibleOnly = command["visible_only"].isNull()
+        ? true
+        : command["visible_only"].toBool();
+    const int role = command["role"].isNull() ? int(Qt::DisplayRole)
+                                              : command["role"].toInt();
+    const QTableView * table = qobject_cast<const QTableView *>(view);
+
+    QList<int> columns;
+    for (int column = 0; column < model->columnCount(); ++column) {
+        if (visibleOnly && table && table->isColumnHidden(column)) {
+            continue;
+        }
+        columns << column;
+    }
+    QList<int> rows;
+    for (int row = 0; row < model->rowCount(); ++row) {
+        if (visibleOnly && table && table->isRowHidden(row)) {
+            continue;
+        }
+        rows << row;
+    }
+
+    const int firstRow = qMax(0, command["first_row"].toInt());
+    int maxRows = command["max_rows"].isNull() ? -1 : command["max_rows"].toInt();
+    if (maxRows < 0) {
+        const qint64 cells =
+            qint64(rows.size() - qMin(firstRow, rows.size())) * columns.size();
+        if (cells > gMaxTableCells && !command["force"].toBool()) {
+            return createError(
+                "TooManyCells",
+                QString::fromUtf8(
+                    "The table has %1 visible rows by %2 columns, %3 cells "
+                    "from row %4 on. Read it page by page with first_row and "
+                    "max_rows, or pass force to insist.")
+                    .arg(rows.size())
+                    .arg(columns.size())
+                    .arg(cells)
+                    .arg(firstRow));
+        }
+        maxRows = rows.size();
+    }
+
+    QList<int> layers;
+    foreach (const QVariant & value, command["roles"].toList()) {
+        bool parsed = false;
+        const int extra = value.toInt(&parsed);
+        if (parsed) {
+            layers << extra;
+        }
+    }
+
+    const bool withFlags = command["with_flags"].toBool();
+    QtJson::JsonArray dumped;
+    QtJson::JsonArray editable;
+    QMap<int, QtJson::JsonArray> layered;
+    for (int index = firstRow;
+         index < rows.size() && dumped.size() < maxRows; ++index) {
+        QtJson::JsonArray line;
+        QtJson::JsonArray flags;
+        QMap<int, QtJson::JsonArray> lines;
+        foreach (int column, columns) {
+            const QModelIndex cell = model->index(rows.at(index), column);
+            line << cell_value(model->data(cell, role));
+            if (withFlags) {
+                flags << bool(model->flags(cell) & Qt::ItemIsEditable);
+            }
+            foreach (int extra, layers) {
+                lines[extra] << cell_value(model->data(cell, extra));
+            }
+        }
+        dumped << QVariant(line);
+        if (withFlags) {
+            editable << QVariant(flags);
+        }
+        foreach (int extra, layers) {
+            layered[extra] << QVariant(lines[extra]);
+        }
+    }
+
+    QtJson::JsonObject result;
+    result["rows"] = dumped;
+    result["row_count"] = rows.size();
+    result["column_count"] = columns.size();
+    result["first_row"] = firstRow;
+    result["returned_rows"] = dumped.size();
+    // какие это строки и колонки в самой модели: дамп пропускает скрытые, а
+    // правка ячейки адресуется по модели, и без карты индексы разъезжаются
+    QtJson::JsonArray columnIndexes;
+    foreach (int column, columns) {
+        columnIndexes << column;
+    }
+    result["column_indexes"] = columnIndexes;
+    QtJson::JsonArray rowIndexes;
+    for (int index = firstRow;
+         index < rows.size() && rowIndexes.size() < dumped.size(); ++index) {
+        rowIndexes << rows.at(index);
+    }
+    result["row_indexes"] = rowIndexes;
+    result["rows_hidden"] = rows.size() != model->rowCount();
+    result["columns_hidden"] = columns.size() != model->columnCount();
+    if (withFlags) {
+        // какие ячейки вообще принимают правку - это спрашивают до того, как
+        // открывать редактор, и узнать это у модели дешевле, чем у делегата
+        result["editable"] = editable;
+    }
+    if (!layers.isEmpty()) {
+        // а роли кладём слоями: у ячейки помимо значения есть блокировка,
+        // допустимые варианты, границы - и всё это своя таблица той же формы
+        QtJson::JsonObject byRole;
+        foreach (int extra, layers) {
+            byRole[QString::number(extra)] = layered.value(extra);
+        }
+        result["layers"] = byRole;
+    }
+    if (command["with_headers"].isNull() || command["with_headers"].toBool()) {
+        QtJson::JsonArray headers;
+        foreach (int column, columns) {
+            headers << cell_value(
+                model->headerData(column, Qt::Horizontal, Qt::DisplayRole));
+        }
+        result["headers"] = headers;
+    }
+    return result;
+}
+
 QtJson::JsonObject Player::model_item_icon(const QtJson::JsonObject & command) {
     WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
     if (ctx.hasError()) {
@@ -2163,9 +2767,24 @@ QtJson::JsonObject Player::widget_keyclick(const QtJson::JsonObject & command) {
         widget = qApp->activeWindow();
     }
     QString text = command["text"].toString();
+    // клавиши платформа доставляет тому, у кого фокус в окне, а не адресату
+    // события: без этого набор уйдёт мимо поля, которое назвал вызывающий
+    QWidget * top = widget->window();
+    QWindow * handle = top ? top->windowHandle() : NULL;
+    if (handle && !command["direct"].toBool()) {
+        widget->activateWindow();
+        widget->setFocus(Qt::MouseFocusReason);
+    }
     for (int i = 0; i < text.count(); ++i) {
         QChar ch = text[i];
         int key = (int)ch.toLatin1();
+        if (handle && !command["direct"].toBool()) {
+            qt_handleKeyEvent(handle, QEvent::KeyPress, key, Qt::NoModifier,
+                              QString(ch), false, 1);
+            qt_handleKeyEvent(handle, QEvent::KeyRelease, key, Qt::NoModifier,
+                              QString(ch), false, 1);
+            continue;
+        }
         qApp->postEvent(
             widget,
             new QKeyEvent(QKeyEvent::KeyPress, key, Qt::NoModifier, ch));

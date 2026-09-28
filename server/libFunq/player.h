@@ -95,6 +95,12 @@ public slots:
     QtJson::JsonObject model_item_action(const QtJson::JsonObject & command);
     QtJson::JsonObject model_item_rect(const QtJson::JsonObject & command);
     QtJson::JsonObject model_item_icon(const QtJson::JsonObject & command);
+    QtJson::JsonObject table_dump(const QtJson::JsonObject & command);
+    QtJson::JsonObject widget_window(const QtJson::JsonObject & command);
+    QtJson::JsonObject model_item_set(const QtJson::JsonObject & command);
+    QtJson::JsonObject model_item_type(const QtJson::JsonObject & command);
+    QtJson::JsonObject model_select_range(
+        const QtJson::JsonObject & command);
     QtJson::JsonObject menu_actions(const QtJson::JsonObject & command);
     QtJson::JsonObject menu_trigger(const QtJson::JsonObject & command);
     QtJson::JsonObject object_property_object(
@@ -139,6 +145,10 @@ private:
     void _object_set_properties(QObject * object, const QVariantMap & props);
     void _model_item_action(const QString &, QAbstractItemView *,
                             const QModelIndex &);
+
+private:
+    QAbstractItemView * find_view(const QtJson::JsonObject & command,
+                                  QtJson::JsonObject & error);
 
 private slots:
     void objectDeleted(QObject * object);
