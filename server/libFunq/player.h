@@ -94,6 +94,7 @@ public slots:
     QtJson::JsonObject model_items(const QtJson::JsonObject & command);
     QtJson::JsonObject model_item_action(const QtJson::JsonObject & command);
     QtJson::JsonObject model_item_rect(const QtJson::JsonObject & command);
+    QtJson::JsonObject model_item_icon(const QtJson::JsonObject & command);
     QtJson::JsonObject menu_actions(const QtJson::JsonObject & command);
     QtJson::JsonObject menu_trigger(const QtJson::JsonObject & command);
     QtJson::JsonObject object_property_object(

@@ -34,6 +34,12 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include "player.h"
 
+#include <QIcon>
+#include <QStyle>
+#include <QStyleOptionViewItem>
+
+#include <QCryptographicHash>
+
 #include "dragndropresponse.h"
 #include "objectpath.h"
 #include "delayedresponse.h"
@@ -284,10 +290,138 @@ QString check_state_name(Qt::CheckState state) {
     return QString();
 }
 
+/**
+ * Describes a pixmap by what it draws, not by where it came from.
+ *
+ * An icon in a tree says which kind of object the row is, and the only stable
+ * handle on it is the image itself: it carries no name, and two rows showing
+ * the same kind share neither object nor file. Hashing the rendered pixels
+ * gives a token that is equal exactly when the drawing is equal.
+ */
+QString icon_fingerprint(const QPixmap & pixmap) {
+    if (pixmap.isNull()) {
+        return QString();
+    }
+    QByteArray bytes;
+    QBuffer buffer(&bytes);
+    buffer.open(QIODevice::WriteOnly);
+    pixmap.toImage().save(&buffer, "PNG");
+    return QString::fromLatin1(
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha1).toHex());
+}
+
+/**
+ * Turns the value of a role into something JSON can carry.
+ *
+ * Applications answer custom roles with whatever type suits them - a colour, a
+ * brush, an icon, an enum. Everything that has a readable shape is spelled out;
+ * an icon becomes its fingerprint plus the size it was drawn at.
+ */
+QVariant describe_role_value(const QVariant & value, bool withIconData) {
+    switch (value.userType()) {
+        case QMetaType::QColor:
+            return value.value<QColor>().name();
+        case QMetaType::QBrush:
+            return value.value<QBrush>().color().name();
+        case QMetaType::QFont: {
+            const QFont font = value.value<QFont>();
+            QVariantMap described;
+            described["family"] = font.family();
+            described["bold"] = font.bold();
+            described["italic"] = font.italic();
+            return described;
+        }
+        case QMetaType::QIcon:
+        case QMetaType::QPixmap:
+        case QMetaType::QImage: {
+            QPixmap pixmap;
+            if (value.userType() == QMetaType::QIcon) {
+                const QIcon icon = value.value<QIcon>();
+                QSize size(32, 32);
+                if (!icon.availableSizes().isEmpty()) {
+                    size = icon.availableSizes().first();
+                }
+                pixmap = icon.pixmap(size);
+                if (!icon.name().isEmpty()) {
+                    QVariantMap described;
+                    described["name"] = icon.name();
+                    described["hash"] = icon_fingerprint(pixmap);
+                    described["width"] = pixmap.width();
+                    described["height"] = pixmap.height();
+                    if (withIconData) {
+                        QByteArray bytes;
+                        QBuffer buffer(&bytes);
+                        buffer.open(QIODevice::WriteOnly);
+                        pixmap.toImage().save(&buffer, "PNG");
+                        described["png"] = QString::fromLatin1(bytes.toBase64());
+                    }
+                    return described;
+                }
+            } else if (value.userType() == QMetaType::QPixmap) {
+                pixmap = value.value<QPixmap>();
+            } else {
+                pixmap = QPixmap::fromImage(value.value<QImage>());
+            }
+            QVariantMap described;
+            described["hash"] = icon_fingerprint(pixmap);
+            described["width"] = pixmap.width();
+            described["height"] = pixmap.height();
+            if (withIconData && !pixmap.isNull()) {
+                QByteArray bytes;
+                QBuffer buffer(&bytes);
+                buffer.open(QIODevice::WriteOnly);
+                pixmap.toImage().save(&buffer, "PNG");
+                described["png"] = QString::fromLatin1(bytes.toBase64());
+            }
+            return described;
+        }
+        default:
+            break;
+    }
+    if (value.canConvert<QString>()) {
+        return value.toString();
+    }
+    // an unknown type is still worth naming: silence would look like an empty role
+    QVariantMap unknown;
+    unknown["type"] = QString::fromLatin1(value.typeName());
+    return unknown;
+}
+
+/**
+ * Reads the roles a caller named, by number.
+ *
+ * Custom roles are plain integers past Qt::UserRole, and an application defines
+ * their meaning itself - which state an icon shows, which badge is on a row.
+ * Nothing but the caller knows which numbers matter, so it passes them in.
+ */
+void dump_item_roles(QAbstractItemModel * model, const QModelIndex & index,
+                     const QList<int> & roles, bool withIconData,
+                     QtJson::JsonObject & out) {
+    if (roles.isEmpty()) {
+        return;
+    }
+    QtJson::JsonObject described;
+    foreach (int role, roles) {
+        const QVariant value = model->data(index, role);
+        if (!value.isValid()) {
+            continue;
+        }
+        const QVariant readable = describe_role_value(value, withIconData);
+        if (readable.isValid()) {
+            described[QString::number(role)] = readable;
+        }
+    }
+    if (!described.isEmpty()) {
+        out["roles"] = described;
+    }
+}
+
 void dump_item_model_attrs(QAbstractItemModel * model, QtJson::JsonObject & out,
                            const QModelIndex & index,
                            const qulonglong & modelId,
-                           bool with_details = false) {
+                           bool with_details = false,
+                           const QList<int> & roles = QList<int>(),
+                           bool with_icon_data = false) {
     out["modelid"] = modelId;
     QString path = item_model_path(model, index);
     if (!path.isEmpty()) {
@@ -311,7 +445,16 @@ void dump_item_model_attrs(QAbstractItemModel * model, QtJson::JsonObject & out,
         const Qt::ItemFlags flags = model->flags(index);
         out["enabled"] = bool(flags & Qt::ItemIsEnabled);
         out["editable"] = bool(flags & Qt::ItemIsEditable);
-        out["has_icon"] = model->data(index, Qt::DecorationRole).isValid();
+        const QVariant decoration = model->data(index, Qt::DecorationRole);
+        out["has_icon"] = decoration.isValid();
+        if (decoration.isValid()) {
+            // the drawing itself is the only handle on which icon this is
+            const QVariant described =
+                describe_role_value(decoration, with_icon_data);
+            if (described.isValid()) {
+                out["icon"] = described;
+            }
+        }
         const QVariant font = model->data(index, Qt::FontRole);
         if (font.canConvert<QFont>()) {
             const QFont itemFont = font.value<QFont>();
@@ -327,25 +470,44 @@ void dump_item_model_attrs(QAbstractItemModel * model, QtJson::JsonObject & out,
             out["tooltip"] = tooltip.toString();
         }
     }
+    dump_item_roles(model, index, roles, with_icon_data, out);
 }
 
 void dump_items_model(QAbstractItemModel * model, QtJson::JsonObject & out,
                       const QModelIndex & parent, const qulonglong & modelId,
-                      bool recursive = true, bool with_details = false) {
+                      bool recursive = true, bool with_details = false,
+                      const QList<int> & roles = QList<int>(),
+                      bool with_icon_data = false) {
     QtJson::JsonArray items;
     for (int i = 0; i < model->rowCount(parent); ++i) {
         for (int j = 0; j < model->columnCount(parent); ++j) {
             QModelIndex index = model->index(i, j, parent);
             QtJson::JsonObject item;
-            dump_item_model_attrs(model, item, index, modelId, with_details);
+            dump_item_model_attrs(model, item, index, modelId, with_details,
+                                  roles, with_icon_data);
             if (j == 0 && recursive && model->hasChildren(index)) {
                 dump_items_model(model, item, index, modelId, true,
-                                 with_details);
+                                 with_details, roles, with_icon_data);
             }
             items << item;
         }
     }
     out["items"] = items;
+}
+
+/**
+ * The role numbers a command asks for.
+ */
+QList<int> asked_roles(const QtJson::JsonObject & command) {
+    QList<int> roles;
+    foreach (const QVariant & value, command["roles"].toList()) {
+        bool parsed = false;
+        const int role = value.toInt(&parsed);
+        if (parsed) {
+            roles << role;
+        }
+    }
+    return roles;
 }
 
 QModelIndex get_model_item(QAbstractItemModel * model, const QString & path,
@@ -1186,7 +1348,8 @@ QtJson::JsonObject Player::model_items(const QtJson::JsonObject & command) {
     bool recursive = !(ctx.obj->inherits("QAbstractTableModel") ||
                        ctx.obj->inherits("QAbstractListModel"));
     dump_items_model(model, result, QModelIndex(), ctx.id, recursive,
-                     command["with_details"].toBool());
+                     command["with_details"].toBool(), asked_roles(command),
+                     command["with_icon_data"].toBool());
     return result;
 }
 
@@ -1626,6 +1789,89 @@ QtJson::JsonObject Player::widget_context_menu(
     QtJson::JsonObject result;
     result["x"] = pos.x();
     result["y"] = pos.y();
+    return result;
+}
+
+/**
+ * Answers the icon of a row by what is drawn, not by what the model holds.
+ *
+ * An application may keep anything in Qt::DecorationRole - StarSteer keeps a
+ * type of its own that recolours a source icon and stamps a badge on it - and
+ * a caller outside the process cannot unpack such a value. What is on screen,
+ * though, is the same picture the user is looking at, and its hash is equal
+ * exactly when two rows are drawn the same.
+ *
+ * The whole row comes back by default, text included. To compare icons alone,
+ * cut a window out of the row with x and width: a tree that draws its own
+ * hierarchy shifts the icon right with every level, and no style can be asked
+ * where it ended up. Ask for the row with with_icon_data once, look at it, and
+ * the offsets are yours.
+ *
+ * The row must be on screen, so pass scroll to bring it there. Selection and
+ * hover repaint the background, so compare rows that are in the same state.
+ */
+QtJson::JsonObject Player::model_item_icon(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QAbstractItemModel * model = ctx.widget->model();
+    if (!model) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no associated model")
+                .arg(ctx.id));
+    }
+    QModelIndex index =
+        get_model_item(model, command["itempath"].toString(),
+                       command["row"].toInt(), command["column"].toInt());
+    if (!index.isValid()) {
+        return createError(
+            "MissingModelItem",
+            QString::fromUtf8("Unable to find an item identified by %1")
+                .arg(command["itempath"].toString()));
+    }
+    if (command["scroll"].toBool()) {
+        ctx.widget->scrollTo(index);
+    }
+
+    QWidget * viewport = ctx.widget->viewport();
+    const QRect row = ctx.widget->visualRect(index);
+    if (row.isEmpty() || !viewport->rect().intersects(row)) {
+        return createError(
+            "ItemNotVisible",
+            QString::fromUtf8("Row %1 of the view (id:%2) is not on screen; "
+                              "pass scroll to bring it there")
+                .arg(index.row())
+                .arg(ctx.id));
+    }
+    // x и width вырезают окно внутри строки, отсчитывая от её левого края
+    const int offset = command["x"].toInt();
+    const int width = command["width"].isNull() ? row.width() - offset
+                                                : command["width"].toInt();
+    QRect iconRect(row.topLeft() + QPoint(offset, 0),
+                   QSize(width, row.height()));
+    iconRect = iconRect.intersected(viewport->rect());
+    if (iconRect.isEmpty()) {
+        return createError(
+            "ItemNotVisible",
+            QString::fromUtf8("The icon of row %1 lies outside the viewport")
+                .arg(index.row()));
+    }
+
+    const QPixmap shot = viewport->grab(iconRect);
+    QtJson::JsonObject result;
+    result["hash"] = icon_fingerprint(shot);
+    result["width"] = shot.width();
+    result["height"] = shot.height();
+    dump_rect(iconRect, "rect", result);
+    if (command["with_icon_data"].toBool()) {
+        QByteArray bytes;
+        QBuffer buffer(&bytes);
+        buffer.open(QIODevice::WriteOnly);
+        shot.toImage().save(&buffer, "PNG");
+        result["png"] = QString::fromLatin1(bytes.toBase64());
+    }
     return result;
 }
 
