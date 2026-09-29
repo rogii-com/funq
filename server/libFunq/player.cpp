@@ -1193,6 +1193,13 @@ QtJson::JsonObject Player::widgets_list(const QtJson::JsonObject & command) {
         QList<QWidget *> widgets = QApplication::topLevelWidgets();
         if (!widgets.isEmpty()) {
             foreach (QWidget * widget, widgets) {
+                // окно с родителем (диалог, меню) приходит через своего
+                // родителя, там же, где его ставит путь и список по oid
+                // родителя; отдельной записью здесь оно отвечалось дважды
+                // вместе со всем содержимым, а защита выше считает его один раз
+                if (widget->parentWidget()) {
+                    continue;
+                }
                 recursive_list_widget(widget, result, with_properties);
             }
         } else {
@@ -3015,38 +3022,88 @@ QtJson::JsonObject Player::tabbar_list(const QtJson::JsonObject & command) {
     return result;
 }
 
-QtJson::JsonObject Player::tabbar_click(const QtJson::JsonObject & command) {
+namespace {
+/**
+ * Answers a tab click once the click and what it set off have run.
+ *
+ * The click is queued, and the answer describes what already happened: the
+ * first turn of the event loop delivers press and release, the second what
+ * the application put off in reply to them. The turns are the loop's own
+ * rather than spun inside the command: a tab whose change opens a menu or a
+ * dialog with exec() held such a command until the window closed, and the
+ * client gave up. Now the window's own loop turns, and the answer goes out
+ * while it is open.
+ */
+class TabClickResponse : public DelayedResponse {
+public:
+    TabClickResponse(Player * player, const QtJson::JsonObject & command,
+                     QTabBar * bar, qulonglong id, int index,
+                     const QtJson::JsonObject & failure = QtJson::JsonObject())
+        : DelayedResponse(player, command),
+          m_bar(bar),
+          m_id(id),
+          m_index(index),
+          m_failure(failure) {}
+
+protected:
+    void execute(int call) {
+        if (!m_failure.isEmpty()) {
+            writeResponse(m_failure);
+        } else if (m_bar.isNull()) {
+            writeResponse(jsonClient()->createError(
+                "NotRegisteredObject",
+                QString::fromUtf8("The tab bar (id:%1) was destroyed before "
+                                  "its click answered")
+                    .arg(m_id)));
+        } else if (call >= 1) {
+            writeResponse(dump_tab(m_bar, m_index));
+        }
+    }
+
+private:
+    QPointer<QTabBar> m_bar;
+    qulonglong m_id;
+    int m_index;
+    QtJson::JsonObject m_failure;
+};
+}  // namespace
+
+DelayedResponse * Player::tabbar_click(const QtJson::JsonObject & command) {
     WidgetLocatorContext<QTabBar> ctx(this, command, "oid");
     if (ctx.hasError()) {
-        return ctx.lastError;
+        // the slot signature fixes the shape of the answer, so the error
+        // travels as a response that answers on its first turn
+        return new TabClickResponse(this, command, NULL, ctx.id, -1,
+                                    ctx.lastError);
     }
     const int index = find_tab(ctx.widget, command);
     if (index < 0 || index >= ctx.widget->count()) {
-        return createError(
-            "InvalidTab",
-            QString::fromUtf8("The tab bar (id:%1) has no tab %2 among its %3")
-                .arg(ctx.id)
-                .arg(command["index"].isNull() ? command["text"].toString()
-                                               : command["index"].toString())
-                .arg(ctx.widget->count()));
+        return new TabClickResponse(
+            this, command, NULL, ctx.id, -1,
+            createError(
+                "InvalidTab",
+                QString::fromUtf8(
+                    "The tab bar (id:%1) has no tab %2 among its %3")
+                    .arg(ctx.id)
+                    .arg(command["index"].isNull()
+                             ? command["text"].toString()
+                             : command["index"].toString())
+                    .arg(ctx.widget->count())));
     }
     const QRect rect = ctx.widget->tabRect(index);
     if (rect.isEmpty()) {
-        return createError(
-            "TabNotVisible",
-            QString::fromUtf8("Tab %1 of the tab bar (id:%2) has no place on "
-                              "screen; scroll it into view first")
-                .arg(index)
-                .arg(ctx.id));
+        return new TabClickResponse(
+            this, command, NULL, ctx.id, -1,
+            createError("TabNotVisible",
+                        QString::fromUtf8(
+                            "Tab %1 of the tab bar (id:%2) has no place on "
+                            "screen; scroll it into view first")
+                            .arg(index)
+                            .arg(ctx.id)));
     }
     mouse_click(ctx.widget, rect.center(), Qt::LeftButton,
                 command["direct"].toBool());
-    // клик стоит в очереди, а ответ должен описывать уже случившееся: первый
-    // виток доставляет нажатие и отпускание, второй - то, что приложение
-    // отложило в ответ на них
-    qApp->processEvents();
-    qApp->processEvents();
-    return dump_tab(ctx.widget, index);
+    return new TabClickResponse(this, command, ctx.widget, ctx.id, index);
 }
 
 QtJson::JsonObject Player::headerview_list(const QtJson::JsonObject & command) {

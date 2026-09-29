@@ -105,8 +105,9 @@ struct PopupCloser {
     bool answered;
     bool closedWhileWaiting;
 
-    PopupCloser() : answered(false), closedWhileWaiting(false) {
-        timer.setInterval(300);
+    explicit PopupCloser(int interval = 300)
+        : answered(false), closedWhileWaiting(false) {
+        timer.setInterval(interval);
         QObject::connect(&timer, &QTimer::timeout, &timer, [this]() {
             if (QWidget * popup = QApplication::activePopupWidget()) {
                 closedWhileWaiting = closedWhileWaiting || !answered;
@@ -444,6 +445,27 @@ private slots:
         QCOMPARE(wResult["classes"].toStringList(),
                  QStringList() << "QWidget"
                                << "QObject");
+    }
+
+    void test_player_widgets_list_names_a_dialog_once() {
+        // диалог с родителем - окно: он и среди окон приложения, и среди детей
+        // родителя, и полный список отвечал его дважды, со всем содержимым, а
+        // защита TooManyWidgets считала его один раз
+        QMainWindow mw;
+        QDialog dialog(&mw);
+        dialog.setObjectName("listedOnce");
+        QWidget inside(&dialog);
+        inside.setObjectName("insideListedOnce");
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        const QtJson::JsonObject listed = player.widgets_list(QtJson::JsonObject());
+        QCOMPARE(count_listed(listed, ObjectPath::objectPath(&dialog)), 1);
+        QCOMPARE(count_listed(listed, ObjectPath::objectPath(&inside)), 1);
+        // место диалога - под родителем, как и в списке по oid родителя
+        QVERIFY(listed["QMainWindow"].toMap()["children"].toMap().contains(
+            "listedOnce"));
     }
 
     void test_player_widget_click() {
@@ -809,6 +831,39 @@ private slots:
         QtJson::JsonObject command;
         command["path"] = path;
         return player.widget_by_path(command)["oid"].toULongLong();
+    }
+
+    /**
+     * Runs a delayed response to its answer, the way the server does.
+     */
+    static QtJson::JsonObject answer_of(DelayedResponse * response) {
+        QtJson::JsonObject answer;
+        QEventLoop loop;
+        QObject::connect(
+            response, &DelayedResponse::aboutToWriteResponse, &loop,
+            [&answer, &loop](const QtJson::JsonObject & result) {
+                answer = result;
+                loop.quit();
+            });
+        response->start();
+        loop.exec();
+        return answer;
+    }
+
+    /**
+     * How many nodes of a widgets_list answer carry the given path.
+     */
+    static int count_listed(const QtJson::JsonObject & nodes,
+                            const QString & path) {
+        int found = 0;
+        foreach (const QVariant & value, nodes) {
+            const QVariantMap node = value.toMap();
+            if (node["path"].toString() == path) {
+                ++found;
+            }
+            found += count_listed(node["children"].toMap(), path);
+        }
+        return found;
     }
 
     void test_player_table_dump() {
@@ -1240,8 +1295,10 @@ private slots:
         QtJson::JsonObject click;
         click["oid"] = command["oid"];
         click["text"] = "three";
-        QtJson::JsonObject clicked = player.tabbar_click(click);
+        QtJson::JsonObject clicked = answer_of(player.tabbar_click(click));
         QCOMPARE(clicked["index"].toInt(), 2);
+        // ответ описывает уже случившееся переключение
+        QVERIFY(clicked["current"].toBool());
         QTest::qWait(200);
         QCOMPARE(bar.currentIndex(), 2);
 
@@ -1250,15 +1307,62 @@ private slots:
         back["oid"] = command["oid"];
         back["index"] = 0;
         back["direct"] = true;
-        player.tabbar_click(back);
+        answer_of(player.tabbar_click(back));
         QTest::qWait(200);
         QCOMPARE(bar.currentIndex(), 0);
 
         QtJson::JsonObject missing;
         missing["oid"] = command["oid"];
         missing["text"] = "nothing like this";
-        QCOMPARE(player.tabbar_click(missing)["errName"].toString(),
+        QCOMPARE(answer_of(player.tabbar_click(missing))["errName"].toString(),
                  QString("InvalidTab"));
+    }
+
+    void test_player_tabbar_click_answers_while_the_menu_it_opened_is_open() {
+        // смена вкладки может открыть меню или диалог с exec(): витки цикла,
+        // прокрученные внутри команды, держали её, пока окно открыто, и клиент
+        // падал по таймауту - как с кнопкой File риббона
+        QMainWindow mw;
+        QWidget * central = new QWidget(&mw);
+        QVBoxLayout * layout = new QVBoxLayout(central);
+        QTabBar bar(central);
+        bar.addTab("one");
+        bar.addTab("two");
+        layout->addWidget(&bar);
+        layout->addStretch();
+        mw.setCentralWidget(central);
+        mw.resize(400, 200);
+        QMenu menu;
+        menu.addAction("unsaved changes");
+        QObject::connect(&bar, &QTabBar::currentChanged, &menu,
+                         [&menu]() { menu.exec(QCursor::pos()); });
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        // меню закрывает ответ; страховка закрывает его, только если ответа нет
+        PopupCloser closer(3000);
+
+        QtJson::JsonObject click;
+        click["oid"] = view_oid(player, "QMainWindow::QWidget::QTabBar");
+        click["index"] = 1;
+        DelayedResponse * response = player.tabbar_click(click);
+        bool menuOpenAtAnswer = false;
+        QObject::connect(response, &DelayedResponse::aboutToWriteResponse, &menu,
+                         [&closer, &menu, &menuOpenAtAnswer]() {
+                             closer.answered = true;
+                             menuOpenAtAnswer = menu.isVisible();
+                             menu.close();
+                         });
+        const QtJson::JsonObject clicked = answer_of(response);
+
+        QVERIFY(!closer.closedWhileWaiting);
+        QVERIFY(menuOpenAtAnswer);
+        QCOMPARE(clicked["index"].toInt(), 1);
+        QCOMPARE(bar.currentIndex(), 1);
     }
 
     void test_player_widget_click_answers_before_a_menu() {
