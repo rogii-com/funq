@@ -1107,6 +1107,15 @@ void recursive_list_quick_item(QQuickItem * item, QtJson::JsonObject & out,
 void list_quick_scene(QObject * object, QtJson::JsonObject & out,
                       bool with_properties) {
 #ifdef QT_QUICK_LIB
+    // an item asked about by its oid answers its own subtree: a panel scene is
+    // hundreds of items with every property, and a caller after one row of it
+    // should not pay for the whole scene
+    if (QQuickItem * item = qobject_cast<QQuickItem *>(object)) {
+        foreach (QQuickItem * child, item->childItems()) {
+            recursive_list_quick_item(child, out, with_properties);
+        }
+        return;
+    }
     QQuickWindow * window = resolveQuickWindow(object);
     QQuickItem * content = window ? window->contentItem() : NULL;
     if (content) {
@@ -1828,8 +1837,12 @@ QtJson::JsonObject Player::menu_trigger(const QtJson::JsonObject & command) {
     // A menu closes itself when the user picks an entry, and code triggered by
     // the entry often opens a dialog - which would come up behind a menu left
     // open. Closing first keeps the application in the state a real pick
-    // leaves it in.
-    if (command["close"].isNull() || command["close"].toBool()) {
+    // leaves it in. Other widgets have actions too - a dialog, a main window -
+    // and picking one of their actions never closes them, so by default only a
+    // popup is closed; an explicit close decides for itself.
+    const bool popup = qobject_cast<QMenu *>(menu) != NULL ||
+                       menu->windowType() == Qt::Popup;
+    if (command["close"].isNull() ? popup : command["close"].toBool()) {
         menu->close();
     }
 

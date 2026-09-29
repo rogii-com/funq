@@ -1365,6 +1365,40 @@ private slots:
         QCOMPARE(bar.currentIndex(), 1);
     }
 
+    void test_player_menu_trigger_leaves_a_dialog_open() {
+        // действия есть и у диалога (сочетание Ctrl+4 диалога Solo висит на
+        // QAction): выбор такого действия диалог не закрывает, а меню - закрывает
+        QMainWindow mw;
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        QDialog dialog(&mw);
+        QAction trace("Trace", &dialog);
+        dialog.addAction(&trace);
+        QSignalSpy traced(&trace, SIGNAL(triggered(bool)));
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(&dialog);
+        command["path"] = "Trace";
+        QVERIFY(!player.menu_trigger(command).contains("errName"));
+        QTRY_COMPARE(traced.count(), 1);
+        QVERIFY(dialog.isVisible());
+
+        QMenu menu(&mw);
+        menu.addAction("Pick");
+        menu.popup(mw.mapToGlobal(QPoint(10, 10)));
+        QTRY_VERIFY(menu.isVisible());
+        QtJson::JsonObject pick;
+        pick["oid"] = player.registerObject(&menu);
+        pick["path"] = "Pick";
+        player.menu_trigger(pick);
+        QTRY_VERIFY(!menu.isVisible());
+    }
+
     void test_player_widget_click_answers_before_a_menu() {
         // кнопка с меню открывает его по нажатию, во вложенном цикле событий:
         // доставленный на месте клик держал бы команду, пока меню открыто, и
@@ -1588,6 +1622,30 @@ private slots:
         result = player.quick_item_find(command);
         QCOMPARE(result["success"].toBool(), false);
         QCOMPARE(result["errName"].toString(), QString("InvalidQuickItem"));
+    }
+
+    void test_widgets_list_of_a_quick_item_lists_its_subtree_only() {
+        // строка индикаторов - десяток элементов, а сцена панели вокруг неё -
+        // сотни со всеми свойствами; читать строку не должно стоить всей сцены
+        QQuickView view;
+        view.setSource(QUrl::fromLocalFile(SOURCE_DIR "rows.qml"));
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject find;
+        find["quick_window_oid"] = player.registerObject(&view);
+        find["qid"] = "row";
+        const QtJson::JsonObject row = player.quick_item_find(find);
+        QVERIFY(row["oid"].value<qulonglong>() != 0);
+
+        QtJson::JsonObject list;
+        list["oid"] = row["oid"];
+        const QtJson::JsonObject listed = player.widgets_list(list);
+        QCOMPARE(QStringList(listed.keys()),
+                 QStringList() << "first" << "second");
     }
 
 #if QT_VERSION_MAJOR < 6
