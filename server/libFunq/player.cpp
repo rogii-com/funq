@@ -66,6 +66,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QMenu>
 #include <QMetaMethod>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QElapsedTimer>
 #include <QPointer>
 #include <QSet>
@@ -403,6 +404,25 @@ QString item_model_path(QAbstractItemModel * model, const QModelIndex & item) {
     }
     return path.join("/");
 }
+
+/**
+ * Hands out the item options a view gives its delegate.
+ *
+ * The method that fills them is protected, but naming it through a subclass
+ * yields a member pointer that works on any view, and the call stays virtual:
+ * a view that tunes its options (icon size, font, features) gives us its own.
+ */
+struct ItemViewOptions : public QAbstractItemView {
+    static QStyleOptionViewItem of(const QAbstractItemView * view) {
+#if QT_VERSION_MAJOR >= 6
+        QStyleOptionViewItem option;
+        (view->*&ItemViewOptions::initViewItemOption)(&option);
+        return option;
+#else
+        return (view->*&ItemViewOptions::viewOptions)();
+#endif
+    }
+};
 
 QString check_state_name(Qt::CheckState state) {
     switch (state) {
@@ -2531,21 +2551,67 @@ QtJson::JsonObject Player::model_item_icon(const QtJson::JsonObject & command) {
                 .arg(index.row())
                 .arg(ctx.id));
     }
+#if QT_VERSION_MAJOR >= 6
+    QAbstractItemDelegate * delegate = ctx.widget->itemDelegateForIndex(index);
+#else
+    QAbstractItemDelegate * delegate = ctx.widget->itemDelegate(index);
+#endif
+    if (!delegate) {
+        return createError(
+            "MissingDelegate",
+            QString::fromUtf8("The view (id:%1) has no delegate to draw row %2")
+                .arg(ctx.id)
+                .arg(index.row()));
+    }
     // x и width вырезают окно внутри строки, отсчитывая от её левого края
     const int offset = command["x"].toInt();
     const int width = command["width"].isNull() ? row.width() - offset
                                                 : command["width"].toInt();
-    QRect iconRect(row.topLeft() + QPoint(offset, 0),
-                   QSize(width, row.height()));
-    iconRect = iconRect.intersected(viewport->rect());
-    if (iconRect.isEmpty()) {
+    if (width <= 0) {
         return createError(
             "ItemNotVisible",
-            QString::fromUtf8("The icon of row %1 lies outside the viewport")
+            QString::fromUtf8("The icon window of row %1 is empty")
                 .arg(index.row()));
     }
+    const QRect iconRect(row.topLeft() + QPoint(offset, 0),
+                         QSize(width, row.height()));
 
-    const QPixmap shot = viewport->grab(iconRect);
+    // Строку рисует заново её делегат, а не снимается экран: выделение, курсор
+    // над строкой, фокус и неактивное окно меняют фон и режим иконки, а
+    // отпечаток должен говорить, какой это объект, а не что с ним сейчас
+    // делают. Чётность строки (Alternate) - тоже положение, а не вид объекта.
+    QStyleOptionViewItem option = ItemViewOptions::of(ctx.widget);
+    option.rect = QRect(QPoint(0, 0), row.size());
+    option.state &= ~(QStyle::State_Selected | QStyle::State_MouseOver |
+                      QStyle::State_HasFocus);
+    option.state |= QStyle::State_Active;
+    if (!(model->flags(index) & Qt::ItemIsEnabled)) {
+        option.state &= ~QStyle::State_Enabled;
+    }
+    if (QTreeView * tree = qobject_cast<QTreeView *>(ctx.widget)) {
+        // у иконки бывает вариант раскрытого узла (QIcon::On), он - часть вида
+        if (tree->isExpanded(index.siblingAtColumn(0))) {
+            option.state |= QStyle::State_Open;
+        }
+    }
+    option.palette.setCurrentColorGroup(
+        option.state & QStyle::State_Enabled ? QPalette::Active
+                                             : QPalette::Disabled);
+    // без styleObject стиль не заводит на самом виде анимацию перехода
+    // к состоянию, которое мы нарисовали вне экрана
+    option.styleObject = nullptr;
+
+    const qreal dpr = viewport->devicePixelRatioF();
+    QPixmap shot((QSizeF(iconRect.size()) * dpr).toSize());
+    shot.setDevicePixelRatio(dpr);
+    shot.fill(viewport->palette().color(
+        viewport->isEnabled() ? QPalette::Active : QPalette::Disabled,
+        viewport->backgroundRole()));
+    {
+        QPainter painter(&shot);
+        painter.translate(-offset, 0);
+        delegate->paint(&painter, option, index);
+    }
     QtJson::JsonObject result;
     result["hash"] = icon_fingerprint(shot);
     result["width"] = shot.width();

@@ -53,6 +53,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QTableView>
 #include <QTimer>
 #include <QToolButton>
+#include <QTreeView>
 #include <QVBoxLayout>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -1125,6 +1126,52 @@ private slots:
         QtJson::JsonObject nothing;
         QCOMPARE(player.widgets_find(nothing)["errName"].toString(),
                  QString("MissingFilter"));
+    }
+
+    void test_player_model_item_icon_ignores_selection() {
+        // отпечаток сравнивает иконки строк; подсветка выделения в него попадать
+        // не должна, иначе выделенная строка «отличается» от такой же соседней
+        QMainWindow mw;
+        QTreeView view(&mw);
+        QStandardItemModel model;
+        QPixmap red(16, 16);
+        red.fill(Qt::red);
+        for (int row = 0; row < 2; ++row) {
+            model.appendRow(new QStandardItem(QIcon(red), "same"));
+        }
+        QPixmap blue(16, 16);
+        blue.fill(Qt::blue);
+        model.appendRow(new QStandardItem(QIcon(blue), "same"));
+        view.setModel(&model);
+        mw.setCentralWidget(&view);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTreeView");
+        command["row"] = 0;
+        command["column"] = 0;
+        const QString plain = player.model_item_icon(command)["hash"].toString();
+        QVERIFY(!plain.isEmpty());
+
+        view.selectionModel()->select(model.index(0, 0),
+                                      QItemSelectionModel::ClearAndSelect);
+        view.setCurrentIndex(model.index(0, 0));
+        qApp->processEvents();
+        QCOMPARE(player.model_item_icon(command)["hash"].toString(), plain);
+
+        QtJson::JsonObject twin = command;
+        twin["row"] = 1;
+        QCOMPARE(player.model_item_icon(twin)["hash"].toString(), plain);
+
+        // а сама иконка в отпечаток попадает: другая картинка - другой отпечаток
+        QtJson::JsonObject other = command;
+        other["row"] = 2;
+        QVERIFY(player.model_item_icon(other)["hash"].toString() != plain);
     }
 
     void test_player_widgets_find_counts_a_dialog_once() {
