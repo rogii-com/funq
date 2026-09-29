@@ -2188,6 +2188,9 @@ QtJson::JsonObject Player::model_item_type(const QtJson::JsonObject & command) {
         send_key(editor, finish, Qt::NoModifier, QString());
     }
 
+    // то же: набор и подтверждение доходят до модели через цикл событий
+    qApp->processEvents();
+
     QtJson::JsonObject result;
     result["editor"] = QString::fromLatin1(editor->metaObject()->className());
     result["editor_text"] = entered;
@@ -2283,6 +2286,8 @@ QtJson::JsonObject Player::widget_window(const QtJson::JsonObject & command) {
     QtJson::JsonObject result;
     result["oid"] = registerObject(window);
     dump_object(window, result);
+    result["objectName"] = window->objectName();
+    result["title"] = window->windowTitle();
     return result;
 }
 
@@ -2900,6 +2905,9 @@ QtJson::JsonObject Player::tabbar_click(const QtJson::JsonObject & command) {
     }
     mouse_click(ctx.widget, rect.center(), Qt::LeftButton,
                 command["direct"].toBool());
+    // событие платформы применяется на следующем витке цикла, а ответ должен
+    // описывать уже случившееся
+    qApp->processEvents();
     return dump_tab(ctx.widget, index);
 }
 

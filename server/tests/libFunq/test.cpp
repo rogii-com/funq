@@ -48,6 +48,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QStandardItemModel>
 #include <QTabBar>
 #include <QTableView>
+#include <QVBoxLayout>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QtTest/QtTest>
@@ -757,6 +758,348 @@ private slots:
         QList<QVariant> items = result["items"].toList();
 
         QCOMPARE(items.count(), 4 * 4);
+    }
+
+    /**
+     * A table of known values behind a view, for the dump tests below.
+     */
+    static void fill_table(QStandardItemModel & model) {
+        for (int row = 0; row < model.rowCount(); ++row) {
+            for (int column = 0; column < model.columnCount(); ++column) {
+                model.setItem(row, column,
+                              new QStandardItem(QString("r%0c%1")
+                                                    .arg(row)
+                                                    .arg(column)));
+            }
+        }
+    }
+
+    static qulonglong view_oid(Player & player, const QString & path) {
+        QtJson::JsonObject command;
+        command["path"] = path;
+        return player.widget_by_path(command)["oid"].toULongLong();
+    }
+
+    void test_player_table_dump() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(3, 2);
+        fill_table(model);
+        model.setHorizontalHeaderLabels(QStringList() << "first"
+                                                      << "second");
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        QtJson::JsonObject result = player.table_dump(command);
+
+        QCOMPARE(result["row_count"].toInt(), 3);
+        QCOMPARE(result["column_count"].toInt(), 2);
+        QCOMPARE(result["returned_rows"].toInt(), 3);
+        QCOMPARE(result["headers"].toStringList(),
+                 QStringList() << "first"
+                               << "second");
+        const QVariantList rows = result["rows"].toList();
+        QCOMPARE(rows.count(), 3);
+        QCOMPARE(rows.at(0).toList().at(1).toString(), QString("r0c1"));
+        QCOMPARE(rows.at(2).toList().at(0).toString(), QString("r2c0"));
+    }
+
+    void test_player_table_dump_page() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(5, 1);
+        fill_table(model);
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["first_row"] = 3;
+        command["max_rows"] = 2;
+        QtJson::JsonObject result = player.table_dump(command);
+
+        QCOMPARE(result["row_count"].toInt(), 5);
+        QCOMPARE(result["returned_rows"].toInt(), 2);
+        QCOMPARE(result["first_row"].toInt(), 3);
+        const QVariantList rows = result["rows"].toList();
+        QCOMPARE(rows.at(0).toList().at(0).toString(), QString("r3c0"));
+        QCOMPARE(result["row_indexes"].toList().at(0).toInt(), 3);
+    }
+
+    void test_player_table_dump_hidden() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(3, 3);
+        fill_table(model);
+        view.setModel(&model);
+        view.hideColumn(1);
+        view.hideRow(0);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        QtJson::JsonObject result = player.table_dump(command);
+
+        // скрытое остаётся за бортом, но карта индексов говорит, что это было
+        QCOMPARE(result["row_count"].toInt(), 2);
+        QCOMPARE(result["column_count"].toInt(), 2);
+        QVERIFY(result["rows_hidden"].toBool());
+        QVERIFY(result["columns_hidden"].toBool());
+        QCOMPARE(result["column_indexes"].toList().at(1).toInt(), 2);
+        QCOMPARE(result["row_indexes"].toList().at(0).toInt(), 1);
+        const QVariantList rows = result["rows"].toList();
+        QCOMPARE(rows.at(0).toList().at(1).toString(), QString("r1c2"));
+
+        command["visible_only"] = false;
+        QtJson::JsonObject whole = player.table_dump(command);
+        QCOMPARE(whole["row_count"].toInt(), 3);
+        QCOMPARE(whole["column_count"].toInt(), 3);
+    }
+
+    void test_player_table_dump_role_and_flags() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(1, 2);
+        fill_table(model);
+        model.item(0, 0)->setData("raw", Qt::UserRole + 1);
+        model.item(0, 1)->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["role"] = int(Qt::UserRole) + 1;
+        command["with_flags"] = true;
+        QtJson::JsonObject result = player.table_dump(command);
+
+        const QVariantList rows = result["rows"].toList();
+        QCOMPARE(rows.at(0).toList().at(0).toString(), QString("raw"));
+        const QVariantList editable = result["editable"].toList();
+        QVERIFY(editable.at(0).toList().at(0).toBool());
+        QVERIFY(!editable.at(0).toList().at(1).toBool());
+    }
+
+    void test_player_table_dump_refuses_a_huge_answer() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(60000, 4);
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        QtJson::JsonObject result = player.table_dump(command);
+
+        // без границ такой ответ убивал приложение: отказ вместо смерти
+        QCOMPARE(result["errName"].toString(), QString("TooManyCells"));
+        QVERIFY(result["errDesc"].toString().contains("60000"));
+
+        command["max_rows"] = 2;
+        QtJson::JsonObject page = player.table_dump(command);
+        QCOMPARE(page["returned_rows"].toInt(), 2);
+    }
+
+    void test_player_model_item_set() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(2, 2);
+        fill_table(model);
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["row"] = 1;
+        command["column"] = 0;
+        command["value"] = "written";
+        QtJson::JsonObject result = player.model_item_set(command);
+
+        QCOMPARE(model.item(1, 0)->text(), QString("written"));
+        QCOMPARE(result["display"].toString(), QString("written"));
+    }
+
+    void test_player_model_item_type() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(1, 1);
+        fill_table(model);
+        view.setModel(&model);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["row"] = 0;
+        command["column"] = 0;
+        command["text"] = "typed";
+        QtJson::JsonObject result = player.model_item_type(command);
+        QTest::qWait(200);
+
+        QVERIFY(!result["editor"].toString().isEmpty());
+        QCOMPARE(model.item(0, 0)->text(), QString("typed"));
+    }
+
+    void test_player_model_item_type_refuses_read_only() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(1, 1);
+        fill_table(model);
+        model.item(0, 0)->setFlags(Qt::ItemIsSelectable | Qt::ItemIsEnabled);
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["row"] = 0;
+        command["column"] = 0;
+        command["text"] = "typed";
+        QtJson::JsonObject result = player.model_item_type(command);
+
+        QCOMPARE(result["errName"].toString(), QString("ItemNotEditable"));
+        QCOMPARE(model.item(0, 0)->text(), QString("r0c0"));
+    }
+
+    void test_player_model_select_range() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(4, 4);
+        fill_table(model);
+        view.setModel(&model);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["top"] = 1;
+        command["left"] = 1;
+        command["bottom"] = 2;
+        command["right"] = 3;
+        QtJson::JsonObject result = player.model_select_range(command);
+
+        QCOMPARE(result["selected_cells"].toInt(), 6);
+        QCOMPARE(view.selectionModel()->selectedIndexes().count(), 6);
+    }
+
+    void test_player_widget_window() {
+        QMainWindow mw;
+        QTableView view(&mw);
+        mw.setObjectName("host");
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "host::QTableView");
+        QtJson::JsonObject result = player.widget_window(command);
+
+        QCOMPARE(result["objectName"].toString(), QString("host"));
+    }
+
+    void test_player_widgets_find() {
+        QMainWindow mw;
+        QTableView first(&mw);
+        first.setObjectName("wanted");
+        QTableView second(&mw);
+        QTabBar bar(&mw);
+        Q_UNUSED(second);
+        Q_UNUSED(bar);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject byClass;
+        byClass["class_name"] = "QTableView";
+        byClass["visible_only"] = false;
+        QCOMPARE(player.widgets_find(byClass)["items"].toList().count(), 2);
+
+        QtJson::JsonObject byName;
+        byName["objectname"] = "wanted";
+        byName["visible_only"] = false;
+        const QVariantList found = player.widgets_find(byName)["items"].toList();
+        QCOMPARE(found.count(), 1);
+
+        QtJson::JsonObject nothing;
+        QCOMPARE(player.widgets_find(nothing)["errName"].toString(),
+                 QString("MissingFilter"));
+    }
+
+    void test_player_tabbar_click_and_rects() {
+        // вкладки кладём в раскладку окна: клик идёт через платформу, а она
+        // ищет виджет по точке. Прямой потомок QMainWindow без раскладки
+        // рисуется там, где его никто не найдёт, и клик уходит в пустоту
+        QMainWindow mw;
+        QWidget * central = new QWidget(&mw);
+        QVBoxLayout * layout = new QVBoxLayout(central);
+        QTabBar bar(central);
+        bar.addTab("one");
+        bar.addTab("two");
+        bar.addTab("three");
+        layout->addWidget(&bar);
+        layout->addStretch();
+        mw.setCentralWidget(central);
+        mw.resize(400, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        // активности не требуем: на занятой машине окно может её не получить
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QWidget::QTabBar");
+        QtJson::JsonObject listed = player.tabbar_list(command);
+        const QVariantList tabs = listed["tabs"].toList();
+        QCOMPARE(tabs.count(), 3);
+        const QVariantMap second = tabs.at(1).toMap();
+        QCOMPARE(second["text"].toString(), QString("two"));
+        QVERIFY(second["rect"].toMap()["width"].toDouble() > 0);
+
+        QtJson::JsonObject click;
+        click["oid"] = command["oid"];
+        click["text"] = "three";
+        QtJson::JsonObject clicked = player.tabbar_click(click);
+        QCOMPARE(clicked["index"].toInt(), 2);
+        QTest::qWait(200);
+        QCOMPARE(bar.currentIndex(), 2);
+
+        // прежняя доставка бьёт прямо в виджет и раскладкой не интересуется
+        QtJson::JsonObject back;
+        back["oid"] = command["oid"];
+        back["index"] = 0;
+        back["direct"] = true;
+        player.tabbar_click(back);
+        QTest::qWait(200);
+        QCOMPARE(bar.currentIndex(), 0);
+
+        QtJson::JsonObject missing;
+        missing["oid"] = command["oid"];
+        missing["text"] = "nothing like this";
+        QCOMPARE(player.tabbar_click(missing)["errName"].toString(),
+                 QString("InvalidTab"));
     }
 
 #if QT_VERSION < 0x050000
