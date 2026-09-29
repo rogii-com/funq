@@ -747,6 +747,24 @@ QtJson::JsonObject Player::list_actions(const QtJson::JsonObject &) {
 }
 
 /**
+ * Queues the child widgets of a widget for a walk that starts from
+ * QApplication::topLevelWidgets().
+ *
+ * That list holds every window, a dialog with a parent included - and the
+ * dialog is also a child of its parent window. Descending into child windows
+ * would reach each of them a second time and answer everything inside twice:
+ * a spreadsheet dialog of StarSteer then seemed to hold two tables of one name.
+ */
+static void queue_child_widgets(QWidget * widget, QList<QWidget *> & queue) {
+    foreach (QObject * child, widget->children()) {
+        QWidget * childWidget = qobject_cast<QWidget *>(child);
+        if (childWidget && !childWidget->isWindow()) {
+            queue << childWidget;
+        }
+    }
+}
+
+/**
  * Finds the widgets a caller is after, without sending the rest.
  *
  * Asking for the whole tree to pick a tab bar out of it costs ten thousand nodes
@@ -772,11 +790,7 @@ QtJson::JsonObject Player::widgets_find(const QtJson::JsonObject & command) {
     QtJson::JsonArray items;
     while (!queue.isEmpty() && items.size() < limit) {
         QWidget * widget = queue.takeFirst();
-        foreach (QObject * child, widget->children()) {
-            if (QWidget * childWidget = qobject_cast<QWidget *>(child)) {
-                queue << childWidget;
-            }
-        }
+        queue_child_widgets(widget, queue);
         if (visibleOnly && !widget->isVisible()) {
             continue;
         }
@@ -1095,11 +1109,7 @@ static int countWidgets() {
     while (!queue.isEmpty()) {
         QWidget * widget = queue.takeFirst();
         ++seen;
-        foreach (QObject * child, widget->children()) {
-            if (QWidget * childWidget = qobject_cast<QWidget *>(child)) {
-                queue << childWidget;
-            }
-        }
+        queue_child_widgets(widget, queue);
     }
     return seen;
 }
@@ -1991,11 +2001,7 @@ QAbstractItemView * Player::find_view(const QtJson::JsonObject & command,
         QList<QAbstractItemView *> found;
         while (!queue.isEmpty()) {
             QWidget * widget = queue.takeFirst();
-            foreach (QObject * child, widget->children()) {
-                if (QWidget * childWidget = qobject_cast<QWidget *>(child)) {
-                    queue << childWidget;
-                }
-            }
+            queue_child_widgets(widget, queue);
             QAbstractItemView * view = qobject_cast<QAbstractItemView *>(widget);
             if (view && view->objectName() == name && view->isVisible()) {
                 found << view;

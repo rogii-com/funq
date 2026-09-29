@@ -34,6 +34,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include <QApplication>
 #include <QBuffer>
+#include <QDialog>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsView>
@@ -1072,6 +1073,36 @@ private slots:
         QtJson::JsonObject nothing;
         QCOMPARE(player.widgets_find(nothing)["errName"].toString(),
                  QString("MissingFilter"));
+    }
+
+    void test_player_widgets_find_counts_a_dialog_once() {
+        // диалог с родителем - и окно верхнего уровня, и потомок главного
+        // окна: обход, зашедший в него дважды, отдавал каждую его таблицу
+        // два раза, и в спредшите StarSteer виделись две одноимённые
+        QMainWindow mw;
+        QDialog dialog(&mw);
+        QVBoxLayout * layout = new QVBoxLayout(&dialog);
+        QTableView * view = new QTableView(&dialog);
+        view->setObjectName("insideDialog");
+        QStandardItemModel model(1, 1);
+        view->setModel(&model);
+        layout->addWidget(view);
+        mw.show();
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject byName;
+        byName["objectname"] = "insideDialog";
+        byName["visible_only"] = true;
+        QCOMPARE(player.widgets_find(byName)["items"].toList().count(), 1);
+
+        // и имя, по которому table_dump ищет представление, не двоится
+        QtJson::JsonObject dump;
+        dump["objectname"] = "insideDialog";
+        QCOMPARE(player.table_dump(dump)["row_count"].toInt(), 1);
     }
 
     void test_player_tabbar_click_and_rects() {
