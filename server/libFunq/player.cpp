@@ -162,6 +162,38 @@ static bool platform_mouse(QWidget * widget, const QPoint & pos,
 }
 
 /**
+ * Delivers a mouse event the way the platform does, on the next turn of the
+ * event loop.
+ *
+ * qt_handleMouseEvent delivers synchronously - QTest relies on that. A button
+ * that answers a press with a menu, or a click with a dialog shown by exec(),
+ * runs a nested event loop inside that delivery, and a command delivering in
+ * place does not answer until the menu or the dialog closes: the client times
+ * out, and its socket is dead for every command after. Posted events never had
+ * that problem, and the commands built on them promise to answer first. Queued,
+ * the platform delivery keeps that promise.
+ *
+ * Returns false when the widget has no window behind it, for the caller to
+ * fall back to posting.
+ */
+static bool queue_platform_mouse(QWidget * widget, const QPoint & pos,
+                                 Qt::MouseButton button,
+                                 Qt::MouseButtons state, QEvent::Type type) {
+    QWidget * top = widget->window();
+    if (!top || !top->windowHandle()) {
+        return false;
+    }
+    // the widget is the context: a widget gone by then takes the event with it
+    QMetaObject::invokeMethod(
+        widget,
+        [widget, pos, button, state, type]() {
+            platform_mouse(widget, pos, button, state, type);
+        },
+        Qt::QueuedConnection);
+    return true;
+}
+
+/**
  * Sends a click to a widget, through the platform when there is a window.
  *
  * A press carries the button among the buttons held down - that is what Qt
@@ -173,15 +205,19 @@ static bool platform_mouse(QWidget * widget, const QPoint & pos,
  * runs hit testing, so it reaches whatever is drawn at that point rather than
  * the widget a caller named; a caller who means the named widget - covered by
  * another, or off screen - says direct and gets it.
+ *
+ * Either way the click lands after the caller returns, as posted events always
+ * did. Press and release are queued apart, so a menu opened by the press gets
+ * the release while it is open - the order a real click has.
  */
 template <class T>
 void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button,
                  bool direct = false) {
     if (QWidget * widget = direct ? NULL : qobject_cast<QWidget *>(w)) {
-        if (platform_mouse(widget, pos, button, button,
-                           QEvent::MouseButtonPress)) {
-            platform_mouse(widget, pos, button, Qt::NoButton,
-                           QEvent::MouseButtonRelease);
+        if (queue_platform_mouse(widget, pos, button, button,
+                                 QEvent::MouseButtonPress)) {
+            queue_platform_mouse(widget, pos, button, Qt::NoButton,
+                                 QEvent::MouseButtonRelease);
             return;
         }
     }
@@ -198,10 +234,10 @@ template <class T>
 void mouse_dclick(T * w, const QPoint & pos, bool direct = false) {
     mouse_click(w, pos, Qt::LeftButton, direct);
     if (QWidget * widget = direct ? NULL : qobject_cast<QWidget *>(w)) {
-        if (platform_mouse(widget, pos, Qt::LeftButton, Qt::LeftButton,
-                           QEvent::MouseButtonDblClick)) {
-            platform_mouse(widget, pos, Qt::LeftButton, Qt::NoButton,
-                           QEvent::MouseButtonRelease);
+        if (queue_platform_mouse(widget, pos, Qt::LeftButton, Qt::LeftButton,
+                                 QEvent::MouseButtonDblClick)) {
+            queue_platform_mouse(widget, pos, Qt::LeftButton, Qt::NoButton,
+                                 QEvent::MouseButtonRelease);
             return;
         }
     }
@@ -2775,6 +2811,29 @@ DelayedResponse * Player::grab_settled(const QtJson::JsonObject & command) {
                                    deadline);
 }
 
+/**
+ * Delivers a key event the way the platform does, on the next turn of the
+ * event loop - for the reason queue_platform_mouse gives: a key that opens a
+ * menu or a dialog must not hold the command that pressed it.
+ *
+ * The platform hands a key to whatever has focus in the window when the key
+ * arrives, so keys queued in order reach the widgets a person typing them would.
+ */
+static void queue_platform_key(QWidget * widget, QEvent::Type type, int key,
+                               const QString & text) {
+    QMetaObject::invokeMethod(
+        widget,
+        [widget, type, key, text]() {
+            QWidget * top = widget->window();
+            QWindow * handle = top ? top->windowHandle() : NULL;
+            if (handle) {
+                qt_handleKeyEvent(handle, type, key, Qt::NoModifier, text,
+                                  false, 1);
+            }
+        },
+        Qt::QueuedConnection);
+}
+
 QtJson::JsonObject Player::widget_keyclick(const QtJson::JsonObject & command) {
     QWidget * widget;
     if (command.contains("oid")) {
@@ -2799,10 +2858,8 @@ QtJson::JsonObject Player::widget_keyclick(const QtJson::JsonObject & command) {
         QChar ch = text[i];
         int key = (int)ch.toLatin1();
         if (handle && !command["direct"].toBool()) {
-            qt_handleKeyEvent(handle, QEvent::KeyPress, key, Qt::NoModifier,
-                              QString(ch), false, 1);
-            qt_handleKeyEvent(handle, QEvent::KeyRelease, key, Qt::NoModifier,
-                              QString(ch), false, 1);
+            queue_platform_key(widget, QEvent::KeyPress, key, QString(ch));
+            queue_platform_key(widget, QEvent::KeyRelease, key, QString(ch));
             continue;
         }
         qApp->postEvent(
@@ -2905,8 +2962,10 @@ QtJson::JsonObject Player::tabbar_click(const QtJson::JsonObject & command) {
     }
     mouse_click(ctx.widget, rect.center(), Qt::LeftButton,
                 command["direct"].toBool());
-    // событие платформы применяется на следующем витке цикла, а ответ должен
-    // описывать уже случившееся
+    // клик стоит в очереди, а ответ должен описывать уже случившееся: первый
+    // виток доставляет нажатие и отпускание, второй - то, что приложение
+    // отложило в ответ на них
+    qApp->processEvents();
     qApp->processEvents();
     return dump_tab(ctx.widget, index);
 }

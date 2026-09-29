@@ -32,6 +32,7 @@ The fact that you are presently reading this means that you have had
 knowledge of the CeCILL v2.1 license and that you accept its terms.
 */
 
+#include <QApplication>
 #include <QBuffer>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
@@ -40,6 +41,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QHeaderView>
 #include <QLineEdit>
 #include <QMainWindow>
+#include <QMenu>
 #include <QObject>
 #include <QPushButton>
 #include <QShortcut>
@@ -48,6 +50,8 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QStandardItemModel>
 #include <QTabBar>
 #include <QTableView>
+#include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -84,6 +88,31 @@ public:
 
     QLineEdit * m_lineEditDrag;
     QLineEdit * m_lineEditDrop;
+};
+
+/**
+ * Closes the popup a test opened, and remembers whether a command was still
+ * waiting for its answer when the popup had to be closed.
+ *
+ * A menu shown by exec() runs a nested event loop. Were a command to deliver
+ * input into such a menu synchronously, the test would hang in that loop; with
+ * this guard it fails instead.
+ */
+struct PopupCloser {
+    QTimer timer;
+    bool answered;
+    bool closedWhileWaiting;
+
+    PopupCloser() : answered(false), closedWhileWaiting(false) {
+        timer.setInterval(300);
+        QObject::connect(&timer, &QTimer::timeout, &timer, [this]() {
+            if (QWidget * popup = QApplication::activePopupWidget()) {
+                closedWhileWaiting = closedWhileWaiting || !answered;
+                popup->close();
+            }
+        });
+        timer.start();
+    }
 };
 
 class TestSlot : public QWidget {
@@ -1100,6 +1129,84 @@ private slots:
         missing["text"] = "nothing like this";
         QCOMPARE(player.tabbar_click(missing)["errName"].toString(),
                  QString("InvalidTab"));
+    }
+
+    void test_player_widget_click_answers_before_a_menu() {
+        // кнопка с меню открывает его по нажатию, во вложенном цикле событий:
+        // доставленный на месте клик держал бы команду, пока меню открыто, и
+        // клиент падал по таймауту - так висела кнопка File риббона StarSteer
+        QMainWindow mw;
+        QWidget * central = new QWidget(&mw);
+        QVBoxLayout * layout = new QVBoxLayout(central);
+        QToolButton * button = new QToolButton(central);
+        QMenu menu;
+        menu.addAction("item");
+        bool menuShown = false;
+        QObject::connect(&menu, &QMenu::aboutToShow, &menu,
+                         [&menuShown]() { menuShown = true; });
+        button->setText("menu");
+        button->setMenu(&menu);
+        button->setPopupMode(QToolButton::InstantPopup);
+        layout->addWidget(button);
+        layout->addStretch();
+        mw.setCentralWidget(central);
+        mw.resize(300, 150);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        PopupCloser closer;
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QWidget::QToolButton");
+        player.widget_click(command);
+        closer.answered = true;
+
+        // ответ ушёл раньше, а меню всё равно открылось - на следующем витке
+        QTRY_VERIFY(menuShown);
+        QVERIFY(!closer.closedWhileWaiting);
+    }
+
+    void test_player_widget_keyclick_answers_before_a_menu() {
+        // клавиша, открывающая меню или диалог, не должна держать команду,
+        // которая её нажала
+        QMainWindow mw;
+        QWidget * central = new QWidget(&mw);
+        QVBoxLayout * layout = new QVBoxLayout(central);
+        QLineEdit * edit = new QLineEdit(central);
+        layout->addWidget(edit);
+        layout->addStretch();
+        mw.setCentralWidget(central);
+        mw.resize(300, 150);
+        QMenu menu;
+        menu.addAction("item");
+        bool menuShown = false;
+        QObject::connect(&menu, &QMenu::aboutToShow, &menu,
+                         [&menuShown]() { menuShown = true; });
+        QObject::connect(edit, &QLineEdit::textEdited, &menu, [&menu, edit]() {
+            menu.exec(edit->mapToGlobal(QPoint(0, edit->height())));
+        });
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        PopupCloser closer;
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QWidget::QLineEdit");
+        command["text"] = "x";
+        player.widget_keyclick(command);
+        closer.answered = true;
+
+        QTRY_VERIFY(menuShown);
+        QVERIFY(!closer.closedWhileWaiting);
+        QCOMPARE(edit->text(), QString("x"));
     }
 
 #if QT_VERSION < 0x050000
