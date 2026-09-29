@@ -986,6 +986,58 @@ private slots:
         QCOMPARE(model.item(0, 0)->text(), QString("typed"));
     }
 
+    void test_player_model_item_type_answers_before_a_modal_on_commit() {
+        // проверка значения при подтверждении может показать окно с exec(): синхронное
+        // подтверждение держало бы команду до его закрытия, и клиент падал по таймауту
+        QMainWindow mw;
+        QTableView view(&mw);
+        QStandardItemModel model(1, 1);
+        fill_table(model);
+        view.setModel(&model);
+        QMenu menu;
+        menu.addAction("invalid value");
+        QObject::connect(&model, &QStandardItemModel::itemChanged, &menu,
+                         [&menu]() { menu.exec(QCursor::pos()); });
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        PopupCloser closer;
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTableView");
+        command["row"] = 0;
+        command["column"] = 0;
+        command["text"] = "typed";
+        QtJson::JsonObject result = player.model_item_type(command);
+        closer.answered = true;
+
+        // подтверждение приходит на следующем витке, и окно проверки открывается уже
+        // после ответа
+        QTRY_COMPARE(model.item(0, 0)->text(), QString("typed"));
+        QVERIFY(!closer.closedWhileWaiting);
+        QVERIFY(result.contains("editor_oid"));
+        QCOMPARE(result["editor_text"].toString(), QString("typed"));
+    }
+
+    void test_player_widget_keyclick_without_a_window_is_an_error() {
+        // без oid клавиши идут активному окну, а его может не быть - на агенте CI
+        // никто не кликает по приложению
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["text"] = "x";
+        if (qApp->activeWindow()) {
+            QSKIP("an active window is left from another test");
+        }
+        QCOMPARE(player.widget_keyclick(command)["errName"].toString(),
+                 QString("NoActiveWindow"));
+    }
+
     void test_player_model_item_type_refuses_read_only() {
         QMainWindow mw;
         QTableView view(&mw);

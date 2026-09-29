@@ -194,6 +194,29 @@ static bool queue_platform_mouse(QWidget * widget, const QPoint & pos,
 }
 
 /**
+ * Delivers a key event the way the platform does, on the next turn of the
+ * event loop - for the reason queue_platform_mouse gives: a key that opens a
+ * menu or a dialog must not hold the command that pressed it.
+ *
+ * The platform hands a key to whatever has focus in the window when the key
+ * arrives, so keys queued in order reach the widgets a person typing them would.
+ */
+static void queue_platform_key(QWidget * widget, QEvent::Type type, int key,
+                               const QString & text) {
+    QMetaObject::invokeMethod(
+        widget,
+        [widget, type, key, text]() {
+            QWidget * top = widget->window();
+            QWindow * handle = top ? top->windowHandle() : NULL;
+            if (handle) {
+                qt_handleKeyEvent(handle, type, key, Qt::NoModifier, text,
+                                  false, 1);
+            }
+        },
+        Qt::QueuedConnection);
+}
+
+/**
  * Sends a click to a widget, through the platform when there is a window.
  *
  * A press carries the button among the buttons held down - that is what Qt
@@ -2221,26 +2244,27 @@ QtJson::JsonObject Player::model_item_type(const QtJson::JsonObject & command) {
     const bool commit = command["commit"].isNull() ? true
                                                    : command["commit"].toBool();
     const int finish = commit ? Qt::Key_Return : Qt::Key_Escape;
+    // подтверждение уходит в очередь, как клик: проверка значения может показать
+    // окно с exec(), и доставленная на месте клавиша держала бы команду до его
+    // закрытия. Значение после подтверждения клиент читает сам, дождавшись, что
+    // редактор закрылся (editor_oid), или увидев окно проверки
     if (platform) {
-        qt_handleKeyEvent(handle, QEvent::KeyPress, finish, Qt::NoModifier,
-                          QString(), false, 1);
-        qt_handleKeyEvent(handle, QEvent::KeyRelease, finish, Qt::NoModifier,
-                          QString(), false, 1);
+        queue_platform_key(editor, QEvent::KeyPress, finish, QString());
+        queue_platform_key(editor, QEvent::KeyRelease, finish, QString());
     } else {
-        send_key(editor, finish, Qt::NoModifier, QString());
+        qApp->postEvent(editor, new QKeyEvent(QEvent::KeyPress, finish,
+                                              Qt::NoModifier, QString()));
+        qApp->postEvent(editor, new QKeyEvent(QEvent::KeyRelease, finish,
+                                              Qt::NoModifier, QString()));
     }
-
-    // то же: набор и подтверждение доходят до модели через цикл событий
-    qApp->processEvents();
 
     QtJson::JsonObject result;
     result["editor"] = QString::fromLatin1(editor->metaObject()->className());
+    result["editor_oid"] = registerObject(editor);
     result["editor_text"] = entered;
     result["typed_by"] = byProperty ? QString("property") : QString("keys");
     result["row"] = index.row();
     result["column"] = index.column();
-    result["value"] = cell_value(model->data(index, Qt::EditRole));
-    result["display"] = cell_value(model->data(index, Qt::DisplayRole));
     return result;
 }
 
@@ -2817,29 +2841,6 @@ DelayedResponse * Player::grab_settled(const QtJson::JsonObject & command) {
                                    deadline);
 }
 
-/**
- * Delivers a key event the way the platform does, on the next turn of the
- * event loop - for the reason queue_platform_mouse gives: a key that opens a
- * menu or a dialog must not hold the command that pressed it.
- *
- * The platform hands a key to whatever has focus in the window when the key
- * arrives, so keys queued in order reach the widgets a person typing them would.
- */
-static void queue_platform_key(QWidget * widget, QEvent::Type type, int key,
-                               const QString & text) {
-    QMetaObject::invokeMethod(
-        widget,
-        [widget, type, key, text]() {
-            QWidget * top = widget->window();
-            QWindow * handle = top ? top->windowHandle() : NULL;
-            if (handle) {
-                qt_handleKeyEvent(handle, type, key, Qt::NoModifier, text,
-                                  false, 1);
-            }
-        },
-        Qt::QueuedConnection);
-}
-
 QtJson::JsonObject Player::widget_keyclick(const QtJson::JsonObject & command) {
     QWidget * widget;
     if (command.contains("oid")) {
@@ -2850,6 +2851,12 @@ QtJson::JsonObject Player::widget_keyclick(const QtJson::JsonObject & command) {
         widget = ctx.widget;
     } else {
         widget = qApp->activeWindow();
+        if (!widget) {
+            // на агенте CI по приложению никто не кликает, и активного окна может не быть
+            return createError(
+                "NoActiveWindow",
+                QString::fromUtf8("No window is active to type into; give an oid"));
+        }
     }
     QString text = command["text"].toString();
     // клавиши платформа доставляет тому, у кого фокус в окне, а не адресату
