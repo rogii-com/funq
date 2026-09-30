@@ -38,8 +38,21 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include "delayedresponse.h"
 
 #include <QKeySequence>
+#include <QPointer>
+#include <QSharedPointer>
 #include <QWidget>
 
+/**
+ * Presses a key sequence on a widget and answers once the keys are delivered.
+ *
+ * The keys go on the next turn of the event loop, not from the response's own
+ * step: a key that opens a dialog with exec() runs the dialog's loop inside
+ * its delivery, and the answer used to wait for the dialog to close. While
+ * the keys are on their way the response watches for an event loop nested
+ * inside their delivery - a modal window, a popup, or a native dialog that Qt
+ * does not list as either; it answers as soon as one runs, naming what opened
+ * in "opened", and lets go of the keyboard so the window gets input.
+ */
 class ShortcutResponse : public DelayedResponse {
     Q_OBJECT
 public:
@@ -55,6 +68,11 @@ private slots:
 private:
     QWidget * m_target;
     QKeySequence m_binding;
+    // the delivery may outlive the response, which is deleted once it answers
+    QSharedPointer<bool> m_delivered;
+    QPointer<QWidget> m_modalBefore;
+    QPointer<QWidget> m_popupBefore;
+    int m_loopLevel;
 };
 
 #endif  // SHORTCUT_RESPONSE_H

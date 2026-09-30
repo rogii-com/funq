@@ -38,11 +38,32 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include <QApplication>
 #include <QKeyEvent>
+#include <QThread>
 #include <QtTest>
+
+static void send_keys(QWidget * target, const QKeySequence & binding,
+                      bool press) {
+    // taken from
+    // http://stackoverflow.com/questions/14283764/how-can-i-simulate-emission-of-a-standard-key-sequence
+    for (int i = 0; i < static_cast<int>(binding.count()); ++i) {
+        uint key = binding[i];
+        Qt::KeyboardModifiers modifiers =
+            static_cast<Qt::KeyboardModifiers>(key & Qt::KeyboardModifierMask);
+        key = key & ~Qt::KeyboardModifierMask;
+        if (press) {
+            QTest::keyPress(target, static_cast<Qt::Key>(key), modifiers);
+        } else {
+            QTest::keyRelease(target, static_cast<Qt::Key>(key), modifiers);
+        }
+    }
+}
 
 ShortcutResponse::ShortcutResponse(JsonClient * client,
                                    const QtJson::JsonObject & command)
-    : DelayedResponse(client, command), m_target(NULL) {
+    : DelayedResponse(client, command),
+      m_target(NULL),
+      m_delivered(new bool(false)),
+      m_loopLevel(0) {
     if (command.contains("oid")) {
         WidgetLocatorContext<QWidget> ctx(static_cast<Player *>(jsonClient()),
                                           command, "oid");
@@ -75,30 +96,58 @@ void ShortcutResponse::execute(int call) {
     if (call == 0) {
         m_target->repaint();
         setInterval(100);
-    } else if (call == 1) {
-        m_target->grabKeyboard();
-    } else if (call == 2) {
-        // taken from
-        // http://stackoverflow.com/questions/14283764/how-can-i-simulate-emission-of-a-standard-key-sequence
-        for (int i = 0; i < static_cast<int>(m_binding.count()); ++i) {
-            uint key = m_binding[i];
-            Qt::KeyboardModifiers modifiers =
-                static_cast<Qt::KeyboardModifiers>(key &
-                                                   Qt::KeyboardModifierMask);
-            key = key & ~Qt::KeyboardModifierMask;
-            QTest::keyPress(m_target, static_cast<Qt::Key>(key), modifiers);
-        }
-    } else if (call == 3) {
-        for (int i = 0; i < static_cast<int>(m_binding.count()); ++i) {
-            uint key = m_binding[i];
-            Qt::KeyboardModifiers modifiers =
-                static_cast<Qt::KeyboardModifiers>(key &
-                                                   Qt::KeyboardModifierMask);
-            key = key & ~Qt::KeyboardModifierMask;
-            QTest::keyRelease(m_target, static_cast<Qt::Key>(key), modifiers);
-        }
-    } else if (call == 4) {
-        m_target->releaseKeyboard();
+        return;
+    }
+    if (call == 1) {
+        m_modalBefore = QApplication::activeModalWidget();
+        m_popupBefore = QApplication::activePopupWidget();
+        m_loopLevel = QThread::currentThread()->loopLevel();
+        // the target is the context: a widget gone by then takes the keys
+        // with it; the response is not, since it may be deleted before a
+        // dialog opened by the keys returns
+        QPointer<QWidget> target(m_target);
+        QSharedPointer<bool> delivered = m_delivered;
+        const QKeySequence binding = m_binding;
+        QMetaObject::invokeMethod(
+            m_target,
+            [target, delivered, binding]() {
+                target->grabKeyboard();
+                send_keys(target, binding, true);
+                if (target) {
+                    send_keys(target, binding, false);
+                }
+                if (target && QWidget::keyboardGrabber() == target) {
+                    target->releaseKeyboard();
+                }
+                *delivered = true;
+            },
+            Qt::QueuedConnection);
+        setInterval(20);
+        return;
+    }
+    if (*m_delivered) {
         writeResponse(QtJson::JsonObject());
+        return;
+    }
+    QWidget * opened = NULL;
+    QWidget * modal = QApplication::activeModalWidget();
+    QWidget * popup = QApplication::activePopupWidget();
+    if (modal && modal != m_modalBefore) {
+        opened = modal;
+    } else if (popup && popup != m_popupBefore) {
+        opened = popup;
+    }
+    // this step runs inside a loop the keys started only when their delivery
+    // is held by it; a native dialog shows up this way and in no other
+    const bool nested = QThread::currentThread()->loopLevel() > m_loopLevel;
+    if (opened || nested) {
+        if (QWidget::keyboardGrabber() == m_target) {
+            m_target->releaseKeyboard();
+        }
+        QtJson::JsonObject result;
+        result["opened"] =
+            opened ? QString::fromLatin1(opened->metaObject()->className())
+                   : QString("event loop");
+        writeResponse(result);
     }
 }

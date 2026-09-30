@@ -604,6 +604,96 @@ private slots:
         QCOMPARE(spy.count(), 1);
     }
 
+    void test_player_shortcut_answers_while_the_dialog_it_opened_is_open() {
+        // нажатие шло из шага ответа: сочетание, открывшее диалог с exec(), держало
+        // команду до закрытия диалога, а захват клавиатуры оставлял диалог без ввода
+        QMainWindow mw;
+        QShortcut shortcut(QKeySequence("Ctrl+O"), &mw, 0, 0, Qt::ApplicationShortcut);
+        QDialog dialog(&mw);
+        QObject::connect(&shortcut, &QShortcut::activated, &dialog,
+                         [&dialog]() { dialog.exec(); });
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject commandPath;
+        commandPath["path"] = "QMainWindow";
+        QtJson::JsonObject command;
+        command["oid"] = player.widget_by_path(commandPath)["oid"];
+        command["keysequence"] = "Ctrl+O";
+
+        bool answered = false;
+        bool closedBeforeAnswer = false;
+        bool dialogWasOpened = false;
+        QWidget * grabberInDialog = NULL;
+        QtJson::JsonObject result;
+        QTimer closer;
+        closer.setInterval(1500);
+        QObject::connect(&closer, &QTimer::timeout, &closer, [&]() {
+            if (QWidget * modal = QApplication::activeModalWidget()) {
+                dialogWasOpened = true;
+                closedBeforeAnswer = closedBeforeAnswer || !answered;
+                grabberInDialog = QWidget::keyboardGrabber();
+                modal->close();
+            }
+        });
+        closer.start();
+
+        DelayedResponse * dresponse = player.shortcut(command);
+        QObject::connect(dresponse, &DelayedResponse::aboutToWriteResponse,
+                         [&](const QtJson::JsonObject & r) {
+                             answered = true;
+                             result = r;
+                         });
+        dresponse->start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(answered && dialogWasOpened && !dialog.isVisible(), 8000);
+        QVERIFY(!closedBeforeAnswer);
+        QVERIFY(grabberInDialog == NULL);
+        QCOMPARE(result["opened"].toString(), QString("QDialog"));
+    }
+
+    void test_player_shortcut_answers_from_a_loop_it_opened_without_a_window() {
+        // нативный диалог Windows не виден ни как модальное окно, ни как попап Qt:
+        // сочетание узнаёт о нём по вложенному циклу событий
+        QMainWindow mw;
+        QShortcut shortcut(QKeySequence("Ctrl+L"), &mw, 0, 0, Qt::ApplicationShortcut);
+        bool loopDone = false;
+        QObject::connect(&shortcut, &QShortcut::activated, &mw, [&loopDone]() {
+            QEventLoop loop;
+            QTimer::singleShot(1500, &loop, SLOT(quit()));
+            loop.exec();
+            loopDone = true;
+        });
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject commandPath;
+        commandPath["path"] = "QMainWindow";
+        QtJson::JsonObject command;
+        command["oid"] = player.widget_by_path(commandPath)["oid"];
+        command["keysequence"] = "Ctrl+L";
+
+        bool answered = false;
+        bool answeredInsideLoop = false;
+        QtJson::JsonObject result;
+        DelayedResponse * dresponse = player.shortcut(command);
+        QObject::connect(dresponse, &DelayedResponse::aboutToWriteResponse,
+                         [&](const QtJson::JsonObject & r) {
+                             answered = true;
+                             answeredInsideLoop = !loopDone;
+                             result = r;
+                         });
+        dresponse->start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(answered && loopDone, 8000);
+        QVERIFY(answeredInsideLoop);
+        QVERIFY(result.contains("opened"));
+    }
+
     void test_player_shortcut_15_times() {
         for (int i = 0; i < 15; i++) {
             test_player_shortcut();
