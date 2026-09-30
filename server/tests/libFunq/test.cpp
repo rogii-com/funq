@@ -41,8 +41,10 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMainWindow>
 #include <QMenu>
+#include <QMimeData>
 #include <QObject>
 #include <QPushButton>
 #include <QShortcut>
@@ -65,6 +67,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QQuickView>
 #endif
 
+#include "funq.h"
 #include "objectpath.h"
 #include "player.h"
 #include "shortcutresponse.h"
@@ -116,6 +119,33 @@ struct PopupCloser {
             }
         });
         timer.start();
+    }
+};
+
+/**
+ * Takes files dropped on a widget and remembers their local paths, the way an
+ * import target of the application takes files from the file manager.
+ */
+struct DropRecorder : public QObject {
+    QStringList dropped;
+
+    bool eventFilter(QObject * watched, QEvent * event) override {
+        switch (event->type()) {
+        case QEvent::DragEnter:
+        case QEvent::DragMove:
+            static_cast<QDropEvent *>(event)->acceptProposedAction();
+            return true;
+        case QEvent::Drop: {
+            QDropEvent * drop = static_cast<QDropEvent *>(event);
+            foreach (const QUrl & url, drop->mimeData()->urls()) {
+                dropped << url.toLocalFile();
+            }
+            drop->acceptProposedAction();
+            return true;
+        }
+        default:
+            return QObject::eventFilter(watched, event);
+        }
     }
 };
 
@@ -1664,6 +1694,55 @@ private slots:
         }
     }
 #endif
+
+    void test_funq_qt_dialogs_turn_native_file_dialogs_off() {
+        // продукт зовёт только QFileDialog: без нативного диалога он становится виджетом,
+        // который funq видит и заполняет на любом рабочем столе
+        QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs, false);
+        qputenv("FUNQ_QT_DIALOGS", "1");
+        Funq::applyDialogPolicy();
+        QVERIFY(QCoreApplication::testAttribute(Qt::AA_DontUseNativeDialogs));
+        qunsetenv("FUNQ_QT_DIALOGS");
+        Funq::applyDialogPolicy();
+        QVERIFY(!QCoreApplication::testAttribute(Qt::AA_DontUseNativeDialogs));
+    }
+
+    void test_player_drop_files_delivers_urls_to_the_viewport() {
+        QMainWindow mw;
+        QListWidget list(&mw);
+        mw.setCentralWidget(&list);
+        DropRecorder recorder;
+        list.viewport()->setAcceptDrops(true);
+        list.viewport()->installEventFilter(&recorder);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject path;
+        path["path"] = "QMainWindow::QListWidget";
+        QtJson::JsonObject command;
+        command["oid"] = player.widget_by_path(path)["oid"];
+        command["paths"] = QVariantList() << "C:/data/a.las" << "C:/data/b.xlsx";
+        const QtJson::JsonObject answer = player.drop_files(command);
+        QVERIFY(answer["accepted"].toBool());
+        QTRY_COMPARE(recorder.dropped, QStringList() << "C:/data/a.las" << "C:/data/b.xlsx");
+    }
+
+    void test_player_drop_files_reports_a_refused_drop() {
+        QMainWindow mw;
+        QListWidget list(&mw);
+        mw.setCentralWidget(&list);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject path;
+        path["path"] = "QMainWindow::QListWidget";
+        QtJson::JsonObject command;
+        command["oid"] = player.widget_by_path(path)["oid"];
+        command["paths"] = QVariantList() << "C:/data/a.las";
+        QVERIFY(!player.drop_files(command)["accepted"].toBool());
+    }
 
 #ifdef QT_QUICK_LIB
     /* QtQuick tests */

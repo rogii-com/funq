@@ -47,10 +47,6 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #define DEFAUT_HOOQ_PORT 9999
 
-#ifdef Q_WS_WIN
-extern Q_GUI_EXPORT bool qt_use_native_dialogs;
-#endif
-
 /*static*/
 Funq * Funq::_instance = 0;
 
@@ -104,9 +100,7 @@ void Funq::onNewConnection() {
 
 void Funq::active_hook_player(Funq::MODE mode) {
     Q_ASSERT(QCoreApplication::instance());
-#ifdef Q_WS_WIN
-    qt_use_native_dialogs = false;
-#endif
+    applyDialogPolicy();
 
     QHostAddress host(QHostAddress::LocalHost);
     const char * env_host = getenv("FUNQ_HOST");
@@ -128,6 +122,16 @@ void Funq::active_hook_player(Funq::MODE mode) {
     QObject::connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, [](){unRegisterPick();});
     QObject::connect(QCoreApplication::instance(), SIGNAL(aboutToQuit()), hook,
                      SLOT(deleteLater()));
+}
+
+/**
+ * Native file dialogs live outside Qt: no widget tree for funq, and on a hidden desktop they
+ * cannot be driven at all. FUNQ_QT_DIALOGS=1 makes QFileDialog draw its widget implementation;
+ * the application calls it the same way.
+ */
+void Funq::applyDialogPolicy() {
+    QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs,
+                                   qgetenv("FUNQ_QT_DIALOGS") == "1");
 }
 
 bool Funq::registerPick() {

@@ -45,6 +45,7 @@ class Funq : public QObject {
     Q_OBJECT
 public:
     static void activate(bool check_activation = false);
+    static void applyDialogPolicy();
 
     enum MODE { PLAYER, PICK };
 

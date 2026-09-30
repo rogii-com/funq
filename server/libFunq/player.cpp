@@ -53,6 +53,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include <QAbstractItemModel>
 #include <QAbstractItemView>
+#include <QAbstractScrollArea>
 #include <QAction>
 #include <QApplication>
 #include <QBrush>
@@ -65,6 +66,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QItemSelectionModel>
 #include <QMenu>
 #include <QMetaMethod>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QElapsedTimer>
@@ -75,6 +77,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QTime>
 #include <QTimer>
 #include <QTreeView>
+#include <QUrl>
 #include <QWidget>
 #include <QWindow>
 
@@ -3332,6 +3335,73 @@ QtJson::JsonObject Player::gitem_properties(
 
 DelayedResponse * Player::drag_n_drop(const QtJson::JsonObject & command) {
     return new DragNDropResponse(this, command);
+}
+
+static QString drop_action_name(Qt::DropAction action) {
+    switch (action) {
+    case Qt::CopyAction: return "copy";
+    case Qt::MoveAction: return "move";
+    case Qt::LinkAction: return "link";
+    default: return "ignore";
+    }
+}
+
+/**
+ * Drops local files on a widget, the way a file dragged from the file manager arrives.
+ *
+ * Enter and move are sent at once to learn whether the target takes the files; the drop itself is
+ * queued like a click: an import started by it may open a dialog with exec(), which must not hold
+ * the command. An item view takes drops on its viewport.
+ */
+QtJson::JsonObject Player::drop_files(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QWidget * target = ctx.widget;
+    if (QAbstractScrollArea * area = qobject_cast<QAbstractScrollArea *>(target)) {
+        target = area->viewport();
+    }
+    QList<QUrl> urls;
+    foreach (const QVariant & path, command["paths"].toList()) {
+        urls << QUrl::fromLocalFile(path.toString());
+    }
+    const QPoint pos = command.contains("x")
+        ? QPoint(command["x"].toInt(), command["y"].toInt()) : target->rect().center();
+    QMimeData * mime = new QMimeData();
+    mime->setUrls(urls);
+    const Qt::DropActions actions = Qt::CopyAction | Qt::MoveAction | Qt::LinkAction;
+    QDragEnterEvent enter(pos, actions, mime, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &enter);
+    // as Qt does it: a move after an accepted enter carries the enter's action, already accepted
+    QDragMoveEvent move(pos, actions, mime, Qt::LeftButton, Qt::NoModifier);
+    move.setAccepted(enter.isAccepted());
+    if (enter.isAccepted()) {
+        move.setDropAction(enter.dropAction());
+        QCoreApplication::sendEvent(target, &move);
+    }
+    QtJson::JsonObject result;
+    result["accepted"] = enter.isAccepted() && move.isAccepted();
+    result["action"] = drop_action_name(move.dropAction());
+    if (!result["accepted"].toBool()) {
+        QDragLeaveEvent leave;
+        QCoreApplication::sendEvent(target, &leave);
+        delete mime;
+        return result;
+    }
+    // the application is the context, not the target: the queued drop must run even if the target
+    // is gone by then, otherwise the mime data would leak
+    QPointer<QWidget> guarded(target);
+    const Qt::DropAction action = move.dropAction();
+    QMetaObject::invokeMethod(QCoreApplication::instance(), [guarded, pos, actions, mime, action]() {
+        if (guarded) {
+            QDropEvent drop(pos, actions, mime, Qt::LeftButton, Qt::NoModifier);
+            drop.setDropAction(action);
+            QCoreApplication::sendEvent(guarded, &drop);
+        }
+        delete mime;
+    }, Qt::QueuedConnection);
+    return result;
 }
 
 /**
