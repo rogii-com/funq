@@ -73,6 +73,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QPointer>
 #include <QSet>
 #include <QStringList>
+#include <QStyleHints>
 #include <QTableView>
 #include <QTime>
 #include <QTimer>
@@ -138,6 +139,45 @@ static int input_stamp() {
 }
 
 /**
+ * The stamp ms milliseconds after another, wrapping as input_stamp does.
+ */
+static int stamp_after(int stamp, int ms) {
+    return int((qint64(stamp) + ms) & 0x7fffffff);
+}
+
+// asks for the stamp of the moment an event is delivered rather than queued;
+// input_stamp never hands it out
+static const int gStampOnDelivery = -1;
+
+// the stamp of the last press fed through the platform
+static int gLastPressStamp = 0;
+
+/**
+ * The stamp for the first press of a double click, clear of the press before
+ * it.
+ *
+ * QGuiApplication makes a double click of a press that follows the previous
+ * press of the same button within mouseDoubleClickInterval at the same place.
+ * A person never presses again that soon without meaning a double click, but a
+ * client does: it clicks a row to select it and at once double clicks it to
+ * activate it. The first press of the double click then paired with the press
+ * of the click - the double click came one press early, and a stray click
+ * followed it. A double click starting at least an interval after the last
+ * press keeps the two apart. Its stamps may then run up to an interval ahead
+ * of the clock; a click after it is stamped by the clock again, which pairs it
+ * with nothing.
+ */
+static int double_click_stamp() {
+    const int interval =
+        QGuiApplication::styleHints()->mouseDoubleClickInterval();
+    const int now = input_stamp();
+    if (now - gLastPressStamp < interval) {
+        return stamp_after(gLastPressStamp, interval);
+    }
+    return now;
+}
+
+/**
  * Delivers a mouse event the way the platform does.
  *
  * Posting straight to a widget skips hit testing, z-order and grabs, and -
@@ -147,21 +187,32 @@ static int input_stamp() {
  * that, so a synthetic click on a tab switched the tab and left the product
  * thinking the old window was still the active one.
  *
+ * The event is stamped with the moment of delivery unless the caller fixed the
+ * stamp in advance.
+ *
  * Returns false when the widget has no window behind it - an offscreen scene,
  * for one - and the caller falls back to posting.
  */
 static bool platform_mouse(QWidget * widget, const QPoint & pos,
                            Qt::MouseButton button, Qt::MouseButtons state,
-                           QEvent::Type type) {
+                           QEvent::Type type, int stamp = gStampOnDelivery) {
     QWidget * top = widget->window();
     QWindow * handle = top ? top->windowHandle() : NULL;
     if (!handle) {
         return false;
     }
+    if (stamp == gStampOnDelivery) {
+        stamp = input_stamp();
+    }
+    // before delivering: a press made inside the delivery, in a nested event
+    // loop, is later and must not be overwritten
+    if (type == QEvent::MouseButtonPress) {
+        gLastPressStamp = stamp;
+    }
     const QPointF inWindow = widget->mapTo(top, pos);
     const QPointF global = widget->mapToGlobal(pos);
     qt_handleMouseEvent(handle, inWindow, global, state, button, type,
-                        Qt::NoModifier, input_stamp());
+                        Qt::NoModifier, stamp);
     return true;
 }
 
@@ -182,7 +233,8 @@ static bool platform_mouse(QWidget * widget, const QPoint & pos,
  */
 static bool queue_platform_mouse(QWidget * widget, const QPoint & pos,
                                  Qt::MouseButton button,
-                                 Qt::MouseButtons state, QEvent::Type type) {
+                                 Qt::MouseButtons state, QEvent::Type type,
+                                 int stamp = gStampOnDelivery) {
     QWidget * top = widget->window();
     if (!top || !top->windowHandle()) {
         return false;
@@ -190,8 +242,8 @@ static bool queue_platform_mouse(QWidget * widget, const QPoint & pos,
     // the widget is the context: a widget gone by then takes the event with it
     QMetaObject::invokeMethod(
         widget,
-        [widget, pos, button, state, type]() {
-            platform_mouse(widget, pos, button, state, type);
+        [widget, pos, button, state, type, stamp]() {
+            platform_mouse(widget, pos, button, state, type, stamp);
         },
         Qt::QueuedConnection);
     return true;
@@ -257,17 +309,45 @@ void mouse_click(T * w, const QPoint & pos, Qt::MouseButton button,
                                     button, Qt::NoButton, Qt::NoModifier));
 }
 
+/**
+ * Sends a double click to a widget, through the platform when there is a
+ * window.
+ *
+ * The platform takes no ready double click: QWindowSystemInterface refuses a
+ * native MouseButtonDblClick (QTBUG-71263), and a debug Qt - the one StarSteer
+ * is tested with - stops on that assert, so the double click never reached the
+ * product. A mouse sends two clicks instead, and QGuiApplication makes a double
+ * click of a press that follows the previous one within
+ * mouseDoubleClickInterval at the same place. So do we: two press and release
+ * pairs at one point, queued like a click and stamped in advance a millisecond
+ * apart, so that no delay in delivering them - a slot the first click runs, a
+ * busy event loop - pulls them apart into two single clicks. The widget gets
+ * what a mouse gives it: a press, a release, a double click, a release; an
+ * item view emits doubleClicked once.
+ *
+ * direct posts the old sequence straight to the widget. It never meets the
+ * platform, so the assert does not concern it.
+ */
 template <class T>
 void mouse_dclick(T * w, const QPoint & pos, bool direct = false) {
-    mouse_click(w, pos, Qt::LeftButton, direct);
     if (QWidget * widget = direct ? NULL : qobject_cast<QWidget *>(w)) {
+        const int first = double_click_stamp();
         if (queue_platform_mouse(widget, pos, Qt::LeftButton, Qt::LeftButton,
-                                 QEvent::MouseButtonDblClick)) {
+                                 QEvent::MouseButtonPress, first)) {
             queue_platform_mouse(widget, pos, Qt::LeftButton, Qt::NoButton,
-                                 QEvent::MouseButtonRelease);
+                                 QEvent::MouseButtonRelease,
+                                 stamp_after(first, 1));
+            queue_platform_mouse(widget, pos, Qt::LeftButton, Qt::LeftButton,
+                                 QEvent::MouseButtonPress,
+                                 stamp_after(first, 2));
+            queue_platform_mouse(widget, pos, Qt::LeftButton, Qt::NoButton,
+                                 QEvent::MouseButtonRelease,
+                                 stamp_after(first, 3));
             return;
         }
     }
+    // direct, or a widget with no window behind it: straight to the widget
+    mouse_click(w, pos, Qt::LeftButton, true);
     qApp->postEvent(w, new QMouseEvent(QEvent::MouseButtonDblClick, pos,
                                        w->mapToGlobal(pos), Qt::LeftButton,
                                        Qt::LeftButton, Qt::NoModifier));

@@ -52,6 +52,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QSignalSpy>
 #include <QStandardItem>
 #include <QStandardItemModel>
+#include <QStyleHints>
 #include <QTabBar>
 #include <QTableView>
 #include <QTimer>
@@ -146,6 +147,58 @@ struct DropRecorder : public QObject {
         default:
             return QObject::eventFilter(watched, event);
         }
+    }
+};
+
+/**
+ * Remembers the button events an object is sent, in order.
+ *
+ * Installed on a window, it sees what the platform fed the window together
+ * with what QGuiApplication made of it - a double click it generated follows
+ * the press it came from - which a widget never sees in full: the press that
+ * makes a double click reaches the widget as the double click alone.
+ */
+struct MouseRecorder : public QObject {
+    QList<QEvent::Type> seen;
+
+    bool eventFilter(QObject * watched, QEvent * event) override {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+            seen << event->type();
+            break;
+        default:
+            break;
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+/**
+ * A widget remembering which of its mouse handlers ran, in order.
+ *
+ * firstReleaseBusyMs keeps its first release busy that long, the way a product
+ * working on a click holds up the input behind it.
+ */
+class MouseHandlersWidget : public QWidget {
+public:
+    QList<QEvent::Type> handled;
+    int firstReleaseBusyMs = 0;
+
+protected:
+    void mousePressEvent(QMouseEvent *) override {
+        handled << QEvent::MouseButtonPress;
+    }
+    void mouseReleaseEvent(QMouseEvent *) override {
+        handled << QEvent::MouseButtonRelease;
+        if (firstReleaseBusyMs > 0) {
+            QTest::qSleep(firstReleaseBusyMs);
+            firstReleaseBusyMs = 0;
+        }
+    }
+    void mouseDoubleClickEvent(QMouseEvent *) override {
+        handled << QEvent::MouseButtonDblClick;
     }
 };
 
@@ -1639,6 +1692,189 @@ private slots:
         QTRY_VERIFY(menuShown);
         QVERIFY(!closer.closedWhileWaiting);
         QCOMPARE(edit->text(), QString("x"));
+    }
+
+    /**
+     * What a window is fed by one double click of a mouse: QGuiApplication
+     * makes the double click of the second press itself.
+     */
+    static QList<QEvent::Type> fed_by_double_click() {
+        return QList<QEvent::Type>()
+               << QEvent::MouseButtonPress << QEvent::MouseButtonRelease
+               << QEvent::MouseButtonPress << QEvent::MouseButtonDblClick
+               << QEvent::MouseButtonRelease;
+    }
+
+    /**
+     * The handlers a widget runs for one double click of a mouse: the press
+     * that made the double click reaches it as the double click alone.
+     */
+    static QList<QEvent::Type> handled_for_double_click() {
+        return QList<QEvent::Type>()
+               << QEvent::MouseButtonPress << QEvent::MouseButtonRelease
+               << QEvent::MouseButtonDblClick << QEvent::MouseButtonRelease;
+    }
+
+    void test_player_model_item_doubleclick_is_two_presses() {
+        // готовый MouseButtonDblClick платформа не принимает: отладочный Qt
+        // StarSteer останавливается на ассерте QTBUG-71263 "Native double
+        // clicks are not implemented", и двойной клик по строке дерева до
+        // продукта не доходил. Двойной клик - два нажатия подряд, а
+        // MouseButtonDblClick из второго делает сам QGuiApplication
+        QMainWindow mw;
+        QTreeView view(&mw);
+        QStandardItemModel model;
+        for (int row = 0; row < 3; ++row) {
+            model.appendRow(new QStandardItem(QString("row %0").arg(row)));
+        }
+        view.setModel(&model);
+        view.setEditTriggers(QAbstractItemView::NoEditTriggers);
+        mw.setCentralWidget(&view);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+        QSignalSpy doubleClicked(&view, SIGNAL(doubleClicked(QModelIndex)));
+        MouseRecorder fed;
+        mw.windowHandle()->installEventFilter(&fed);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTreeView");
+        command["row"] = 1;
+        command["column"] = 0;
+        command["itemaction"] = "doubleclick";
+        QVERIFY(!player.model_item_action(command).contains("errName"));
+        // ответ, как у клика, уходит раньше самого ввода
+        QCOMPARE(doubleClicked.count(), 0);
+
+        QTRY_COMPARE(doubleClicked.count(), 1);
+        QTest::qWait(100);
+        QCOMPARE(doubleClicked.count(), 1);
+        QCOMPARE(doubleClicked.at(0).at(0).value<QModelIndex>(),
+                 model.index(1, 0));
+        QCOMPARE(fed.seen, fed_by_double_click());
+    }
+
+    void test_player_widget_click_doubleclick_is_two_presses() {
+        QMainWindow mw;
+        MouseHandlersWidget * target = new MouseHandlersWidget;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+        MouseRecorder fed;
+        mw.windowHandle()->installEventFilter(&fed);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["mouseAction"] = "doubleclick";
+        player.widget_click(command);
+
+        QTRY_COMPARE(target->handled.count(), 4);
+        QTest::qWait(100);
+        QCOMPARE(target->handled, handled_for_double_click());
+        QCOMPARE(fed.seen, fed_by_double_click());
+    }
+
+    void test_player_widget_click_doubleclick_right_after_a_click() {
+        // клиент кликает строку, чтобы выделить, и тут же дважды - чтобы
+        // активировать. Человек так скоро в то же место не нажимает, а Qt
+        // склеивал первое нажатие двойного клика с нажатием клика: двойной
+        // клик приходил на первом нажатии, а за ним шёл лишний клик
+        QMainWindow mw;
+        MouseHandlersWidget * target = new MouseHandlersWidget;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        player.widget_click(command);
+        QTRY_COMPARE(target->handled.count(), 2);
+
+        command["mouseAction"] = "doubleclick";
+        player.widget_click(command);
+        QTRY_COMPARE(target->handled.count(), 6);
+        QTest::qWait(100);
+        QList<QEvent::Type> expected;
+        expected << QEvent::MouseButtonPress << QEvent::MouseButtonRelease;
+        expected += handled_for_double_click();
+        QCOMPARE(target->handled, expected);
+
+        // штампы такого двойного клика обгоняют часы, а клик следом за ним -
+        // снова просто клик
+        command.remove("mouseAction");
+        player.widget_click(command);
+        QTRY_COMPARE(target->handled.count(), 8);
+        QTest::qWait(100);
+        expected << QEvent::MouseButtonPress << QEvent::MouseButtonRelease;
+        QCOMPARE(target->handled, expected);
+    }
+
+    void test_player_widget_click_doubleclick_survives_a_busy_first_click() {
+        // мышь ставит на нажатие время, когда его сделали, а не когда
+        // доставили: продукт, занятый первым кликом дольше интервала двойного
+        // клика, всё равно получает двойной клик. Штампы при доставке
+        // разводили бы нажатия на два одиночных клика
+        QMainWindow mw;
+        MouseHandlersWidget * target = new MouseHandlersWidget;
+        target->firstReleaseBusyMs =
+            QGuiApplication::styleHints()->mouseDoubleClickInterval() + 100;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        mw.activateWindow();
+        (void)QTest::qWaitForWindowActive(&mw);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["mouseAction"] = "doubleclick";
+        player.widget_click(command);
+
+        QTRY_COMPARE(target->handled.count(), 4);
+        QTest::qWait(100);
+        QCOMPARE(target->handled, handled_for_double_click());
+    }
+
+    void test_player_widget_click_doubleclick_direct_goes_to_the_widget() {
+        // прямая доставка идёт мимо платформы, и ассерта QTBUG-71263 у неё
+        // нет: виджет, как и раньше, получает готовый двойной клик
+        QMainWindow mw;
+        MouseHandlersWidget * target = new MouseHandlersWidget;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        MouseRecorder fed;
+        mw.windowHandle()->installEventFilter(&fed);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["mouseAction"] = "doubleclick";
+        command["direct"] = true;
+        player.widget_click(command);
+
+        QTRY_COMPARE(target->handled.count(), 4);
+        QTest::qWait(100);
+        QCOMPARE(target->handled, handled_for_double_click());
+        QVERIFY(fed.seen.isEmpty());
     }
 
 #if QT_VERSION < 0x050000
