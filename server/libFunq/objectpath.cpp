@@ -34,12 +34,16 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include "objectpath.h"
 
+#include <algorithm>
+
 #include <QApplication>
 #include <QCoreApplication>
 #include <QEvent>
 #include <QGraphicsItem>
 #include <QGraphicsView>
 #include <QHash>
+#include <QPair>
+#include <QStringList>
 #include <QWidget>
 #include <QWindow>
 
@@ -59,6 +63,15 @@ inline QString _rawObjectName(QObject * object) {
     if (rawName.isEmpty()) {
         rawName = object->metaObject()->className();
     }
+    return rawName;
+}
+
+/**
+ * The raw name as it appears in a path, with "::" escaped.
+ */
+inline QString escapedRawName(QObject * object) {
+    QString rawName = _rawObjectName(object);
+    rawName.replace("::", ":_:");
     return rawName;
 }
 
@@ -116,6 +129,26 @@ public:
             }
         }
         return index;
+    }
+
+    /**
+     * Live parentless objects with one of these raw names, in the order they
+     * were first seen - the order their namesake indexes follow.
+     */
+    QList<QObject *> namesakes(const QStringList & names) const {
+        QList<QPair<quint64, QObject *> > ranked;
+        for (QHash<QObject *, quint64>::const_iterator it = m_ranks.constBegin();
+             it != m_ranks.constEnd(); ++it) {
+            if (!it.key()->parent() && names.contains(escapedRawName(it.key()))) {
+                ranked << qMakePair(it.value(), it.key());
+            }
+        }
+        std::sort(ranked.begin(), ranked.end());
+        QList<QObject *> ordered;
+        for (int i = 0; i < ranked.size(); ++i) {
+            ordered << ranked.at(i).second;
+        }
+        return ordered;
     }
 
     void watch() {
@@ -202,6 +235,51 @@ QString ObjectPath::objectName(QObject * object) {
     return name;
 }
 
+namespace {
+
+/**
+ * The object a path component names among objects listed in index order.
+ *
+ * A component is the raw name, with the namesake index appended when the
+ * object is not the first of that name ("QMenu-3"). Working out every
+ * object's full name to compare it made a lookup quadratic: the index of one
+ * object walks its namesakes, and for a parentless object that means every
+ * parentless object seen. An application with thousands of menus and popups
+ * paid a few hundred milliseconds for each widget_by_path. Here the index is
+ * counted in the same single pass. A name of its own that ends in digits
+ * ("tab-2") is still found: an object whose raw name is the whole component
+ * and is the first of that name carries it as is.
+ */
+QObject * pickComponent(const QList<QObject *> & ordered, const QString & name) {
+    QString base;
+    int index = 0;
+    const int dash = name.lastIndexOf('-');
+    if (dash > 0 && dash < name.size() - 1) {
+        bool isNumber = false;
+        const int number = name.mid(dash + 1).toInt(&isNumber);
+        if (isNumber && number > 0) {
+            base = name.left(dash);
+            index = number;
+        }
+    }
+    int baseSeen = 0;
+    foreach (QObject * object, ordered) {
+        const QString raw = escapedRawName(object);
+        if (raw == name) {
+            return object;
+        }
+        if (!base.isEmpty() && raw == base) {
+            if (baseSeen == index) {
+                return object;
+            }
+            ++baseSeen;
+        }
+    }
+    return 0;
+}
+
+}  // namespace
+
 QObject * ObjectPath::findObject(const QString & path) {
     const QString separator("::");
     QStringList parts = path.split(separator);
@@ -209,36 +287,21 @@ QObject * ObjectPath::findObject(const QString & path) {
         return 0;
     }
     const QString name = parts.takeLast();
-    QObject * parent = 0;
     if (parts.isEmpty()) {
-        // Top level widget
+        // a top level widget or window (qtquick), numbered by first sight
         registerTopLevelObjects();
-        Q_FOREACH (QWidget * widget, QApplication::topLevelWidgets()) {
-            if (objectName(widget) == name) {
-                return widget;
-            }
+        QStringList names(name);
+        const int dash = name.lastIndexOf('-');
+        if (dash > 0) {
+            names << name.left(dash);
         }
-        // did not find any ? - let's try on windows (qtquick)
-        Q_FOREACH (QWindow * window, QApplication::topLevelWindows()) {
-            if (objectName(window) == name) {
-                return window;
-            }
-        }
+        return pickComponent(ParentlessOrder::instance()->namesakes(names), name);
+    }
+    QObject * parent = findObject(parts.join(separator));
+    if (!parent) {
         return 0;
-    } else {
-        parent = findObject(parts.join(separator));
-        if (!parent) {
-            return 0;
-        }
     }
-
-    Q_FOREACH (QObject * child, parent->children()) {
-        if (objectName(child) == name) {
-            return child;
-        }
-    }
-
-    return 0;
+    return pickComponent(parent->children(), name);
 }
 
 qulonglong ObjectPath::graphicsItemId(QGraphicsItem * item) {

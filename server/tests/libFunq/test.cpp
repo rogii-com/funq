@@ -46,6 +46,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QObject>
 #include <QPushButton>
 #include <QShortcut>
+#include <QElapsedTimer>
 #include <QSignalSpy>
 #include <QStandardItem>
 #include <QStandardItemModel>
@@ -216,6 +217,49 @@ private slots:
 
         QCOMPARE(ObjectPath::findObject("QMainWindow:::_:NAMEd"), &obj2);
     }
+    void test_objectPath_findObject_among_many_parentless_namesakes() {
+        // окно верхнего уровня нумеруется среди одноимённых: считать номер каждому окну при
+        // каждом поиске - квадрат от числа окон, а у приложения их тысячи (меню, попапы)
+        QList<QWidget *> twins;
+        for (int i = 0; i < 1500; ++i) {
+            QWidget * twin = new QWidget();
+            twin->setObjectName("Twin");
+            twins << twin;
+        }
+        ObjectPath::registerTopLevelObjects();
+        // номера раздаются в порядке, в каком funq увидел окна, поэтому путь берём у окна
+        const QString path = ObjectPath::objectPath(twins.at(1200));
+        QElapsedTimer timer;
+        timer.start();
+        QObject * found = NULL;
+        for (int i = 0; i < 20; ++i) {
+            found = ObjectPath::findObject(path);
+        }
+        const qint64 elapsed = timer.elapsed();
+        QCOMPARE(found, static_cast<QObject *>(twins.at(1200)));
+        foreach (int i, QList<int>() << 0 << 1 << 700 << 1499) {
+            QCOMPARE(ObjectPath::findObject(ObjectPath::objectPath(twins.at(i))),
+                     static_cast<QObject *>(twins.at(i)));
+        }
+        QVERIFY(ObjectPath::findObject("Twin-1500") == NULL);
+        qDeleteAll(twins);
+        QVERIFY2(elapsed < 1000, qPrintable(QString("20 lookups took %1 ms").arg(elapsed)));
+    }
+
+    void test_objectPath_findObject_keeps_a_name_that_ends_in_digits() {
+        // собственное имя вида "tab-2" - это имя, а не номер соседа
+        QMainWindow parent;
+        QObject tab(&parent);
+        tab.setObjectName("tab-2");
+        QObject twin(&parent);
+        twin.setObjectName("tab");
+        QObject twin2(&parent);
+        twin2.setObjectName("tab");
+        QCOMPARE(ObjectPath::findObject("QMainWindow::tab-2"), &tab);
+        QCOMPARE(ObjectPath::findObject("QMainWindow::tab-1"), &twin2);
+        QCOMPARE(ObjectPath::findObject("QMainWindow::tab"), &twin);
+    }
+
     void test_objectpath_graphicsItemId() {
         QGraphicsView view;
         QGraphicsScene scene;
