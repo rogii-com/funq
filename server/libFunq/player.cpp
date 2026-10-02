@@ -2453,6 +2453,72 @@ QtJson::JsonObject Player::model_select_range(
 }
 
 /**
+ * Selects whole rows of a view, wherever they stand in a tree.
+ *
+ * model_select_range addresses the top level of the model only, and a tree
+ * puts the rows a test wants - two grids under Grids - one level down. Each
+ * item is named the way model_item_action names it: the path of its parents
+ * and its row. The first call replaces the selection and the next ones add to
+ * it, which is what holding Ctrl while clicking the rows does; a click cannot
+ * carry the modifier, so the selection model is asked directly.
+ */
+QtJson::JsonObject Player::model_select_items(
+    const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QAbstractItemModel * model = ctx.widget->model();
+    QItemSelectionModel * selection = ctx.widget->selectionModel();
+    if (!model || !selection) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no model to select in")
+                .arg(ctx.id));
+    }
+    const QVariantList items = command["items"].toList();
+    if (items.isEmpty()) {
+        return createError("MissingModelItem",
+                           QString::fromUtf8("No items to select"));
+    }
+    const bool add = command["mode"].toString() == "select";
+
+    QItemSelection chosen;
+    QModelIndex last;
+    foreach (const QVariant & entry, items) {
+        const QVariantMap item = entry.toMap();
+        const QString itempath = item["itempath"].toString();
+        const QModelIndex first = get_model_item(
+            model, itempath, item["row"].toInt(), item["column"].toInt());
+        if (!first.isValid()) {
+            return createError(
+                "MissingModelItem",
+                QString::fromUtf8("Unable to find an item identified by %1 "
+                                  "row %2")
+                    .arg(itempath)
+                    .arg(item["row"].toInt()));
+        }
+        const QModelIndex parent = first.parent();
+        const int lastColumn = qMax(0, model->columnCount(parent) - 1);
+        chosen.select(model->index(first.row(), 0, parent),
+                      model->index(first.row(), lastColumn, parent));
+        last = first;
+    }
+
+    QItemSelectionModel::SelectionFlags flags =
+        QItemSelectionModel::Select | QItemSelectionModel::Rows;
+    if (!add) {
+        flags |= QItemSelectionModel::Clear;
+    }
+    selection->select(chosen, flags);
+    selection->setCurrentIndex(last, QItemSelectionModel::NoUpdate);
+
+    QtJson::JsonObject result;
+    result["selected_rows"] = selection->selectedRows().size();
+    return result;
+}
+
+/**
  * The window a widget lives in.
  *
  * windows_list answers the windows of the application, and a dialog made of

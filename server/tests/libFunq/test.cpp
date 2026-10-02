@@ -1355,6 +1355,45 @@ private slots:
         QCOMPARE(view.selectionModel()->selectedIndexes().count(), 6);
     }
 
+    void test_player_model_select_items() {
+        QMainWindow mw;
+        QTreeView view(&mw);
+        QStandardItemModel model;
+        QStandardItem * grids = new QStandardItem("Grids");
+        for (int i = 0; i < 3; ++i) {
+            grids->appendRow(new QStandardItem(QString("Grid%1").arg(i)));
+        }
+        model.appendRow(grids);
+        view.setModel(&model);
+        view.expandAll();
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject command;
+        command["oid"] = view_oid(player, "QMainWindow::QTreeView");
+        QVariantMap first;
+        first["itempath"] = "0-0";
+        first["row"] = 0;
+        first["column"] = 0;
+        command["items"] = QVariantList() << first;
+        QtJson::JsonObject result = player.model_select_items(command);
+        QCOMPARE(result["selected_rows"].toInt(), 1);
+
+        QVariantMap third;
+        third["itempath"] = "0-0";
+        third["row"] = 2;
+        third["column"] = 0;
+        command["items"] = QVariantList() << third;
+        command["mode"] = "select";
+        result = player.model_select_items(command);
+        QCOMPARE(result["selected_rows"].toInt(), 2);
+
+        command["mode"] = "replace";
+        result = player.model_select_items(command);
+        QCOMPARE(result["selected_rows"].toInt(), 1);
+    }
+
     void test_player_widget_window() {
         QMainWindow mw;
         QTableView view(&mw);
