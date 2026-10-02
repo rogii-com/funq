@@ -1411,6 +1411,94 @@ QtJson::JsonObject Player::widget_click(const QtJson::JsonObject & command) {
     return result;
 }
 
+/**
+ * Drags the mouse inside a widget: moves to the first point, presses, walks
+ * the points in steps with the button held, releases at the last one.
+ *
+ * Every event goes through the platform like a click does, so hit testing, the
+ * press grab and qApp->mouseButtons() behave as for a person. The points are
+ * relative to the widget. The events are timed apart by "interval" milliseconds
+ * from single shot timers and land after the answer: a tool that reacts to the
+ * press by opening a menu or a nested loop must not hold the command, so the
+ * caller waits for the effect itself.
+ */
+QtJson::JsonObject Player::widget_drag(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QWidget * widget = ctx.widget;
+    QWidget * top = widget->window();
+    if (!top || !top->windowHandle()) {
+        return createError("NoPlatformWindow",
+                           "The widget has no window to take a platform drag");
+    }
+
+    Qt::MouseButton button = Qt::LeftButton;
+    const QString buttonName = command["button"].toString();
+    if (buttonName == "right") {
+        button = Qt::RightButton;
+    } else if (buttonName == "middle") {
+        button = Qt::MiddleButton;
+    } else if (!buttonName.isEmpty() && buttonName != "left") {
+        return createError(
+            "InvalidButton",
+            QString::fromUtf8("Unknown mouse button `%1`").arg(buttonName));
+    }
+
+    QList<QPoint> points;
+    foreach (const QVariant & item, command["points"].toList()) {
+        const QVariantMap point = item.toMap();
+        points << QPoint(point["x"].toInt(), point["y"].toInt());
+    }
+    if (points.size() < 2) {
+        return createError("InvalidPoints",
+                           "A drag needs at least two points");
+    }
+    const int steps = qMax(1, command["steps"].toInt());
+    const int interval = qMax(0, command.contains("interval")
+                                     ? command["interval"].toInt() : 10);
+    if (steps * (points.size() - 1) > 10000) {
+        return createError("TooManySteps", "A drag is limited to 10000 moves");
+    }
+
+    QList<QPoint> path;
+    path << points.first();
+    for (int i = 1; i < points.size(); ++i) {
+        for (int step = 1; step <= steps; ++step) {
+            path << points[i - 1] + (points[i] - points[i - 1]) * step / steps;
+        }
+    }
+
+    int delay = 0;
+    const QEvent::Type move = QEvent::MouseMove;
+    QTimer::singleShot(delay, widget, [widget, path, button, move]() {
+        platform_mouse(widget, path.first(), Qt::NoButton, Qt::NoButton, move);
+    });
+    delay += interval;
+    QTimer::singleShot(delay, widget, [widget, path, button]() {
+        platform_mouse(widget, path.first(), button, button,
+                       QEvent::MouseButtonPress);
+    });
+    for (int i = 1; i < path.size(); ++i) {
+        delay += interval;
+        const QPoint at = path[i];
+        QTimer::singleShot(delay, widget, [widget, at, button, move]() {
+            platform_mouse(widget, at, Qt::NoButton, button, move);
+        });
+    }
+    delay += interval;
+    const QPoint last = path.last();
+    QTimer::singleShot(delay, widget, [widget, last, button]() {
+        platform_mouse(widget, last, button, Qt::NoButton,
+                       QEvent::MouseButtonRelease);
+    });
+
+    QtJson::JsonObject result;
+    result["duration"] = delay;
+    return result;
+}
+
 QtJson::JsonObject Player::quick_item_click(
     const QtJson::JsonObject & command) {
 #ifdef QT_QUICK_LIB

@@ -203,6 +203,30 @@ protected:
     }
 };
 
+/**
+ * A widget writing down the press, the moves made with a button held and the
+ * release, with their positions.
+ */
+class DragRecorderWidget : public QWidget {
+public:
+    QList<QPoint> pressed;
+    QList<QPoint> moved;
+    QList<QPoint> released;
+    Qt::MouseButtons buttonsOnMove;
+
+protected:
+    void mousePressEvent(QMouseEvent * event) override {
+        pressed << event->pos();
+    }
+    void mouseMoveEvent(QMouseEvent * event) override {
+        moved << event->pos();
+        buttonsOnMove = event->buttons();
+    }
+    void mouseReleaseEvent(QMouseEvent * event) override {
+        released << event->pos();
+    }
+};
+
 class TestSlot : public QWidget {
     Q_OBJECT
 public:
@@ -1938,6 +1962,57 @@ private slots:
         QTest::qWait(100);
         QCOMPARE(target->handled, handled_for_double_click());
         QVERIFY(fed.seen.isEmpty());
+    }
+
+    void test_player_widget_drag_walks_the_points_with_the_button_held() {
+        QMainWindow mw;
+        DragRecorderWidget * target = new DragRecorderWidget;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        QVariantMap from, to;
+        from["x"] = 20;
+        from["y"] = 30;
+        to["x"] = 120;
+        to["y"] = 30;
+        command["points"] = QVariantList() << from << to;
+        command["steps"] = 5;
+        command["interval"] = 1;
+        QVERIFY(!player.widget_drag(command).contains("errName"));
+
+        // the answer comes first: nothing has reached the widget yet
+        QVERIFY(target->pressed.isEmpty());
+        QTRY_COMPARE(target->released.count(), 1);
+        QCOMPARE(target->pressed, QList<QPoint>() << QPoint(20, 30));
+        QCOMPARE(target->released, QList<QPoint>() << QPoint(120, 30));
+        QCOMPARE(target->moved.last(), QPoint(120, 30));
+        QVERIFY(target->moved.contains(QPoint(80, 30)));
+        QVERIFY(target->buttonsOnMove.testFlag(Qt::LeftButton));
+    }
+
+    void test_player_widget_drag_needs_two_points() {
+        QMainWindow mw;
+        QWidget * target = new QWidget;
+        mw.setCentralWidget(target);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        QVariantMap one;
+        one["x"] = 1;
+        one["y"] = 1;
+        command["points"] = QVariantList() << one;
+        QCOMPARE(player.widget_drag(command)["errName"].toString(),
+                 QString("InvalidPoints"));
     }
 
 #if QT_VERSION < 0x050000
