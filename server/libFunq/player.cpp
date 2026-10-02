@@ -2453,6 +2453,19 @@ QtJson::JsonObject Player::model_select_range(
 }
 
 /**
+ * call_slot that returns before the slot runs.
+ *
+ * The name is what tells a caller that the DLL has the queued call: an older
+ * call_slot would ignore a flag and wait for a modal window to be closed.
+ */
+QtJson::JsonObject Player::call_slot_queued(
+    const QtJson::JsonObject & command) {
+    QtJson::JsonObject queued = command;
+    queued["queued"] = true;
+    return call_slot(queued);
+}
+
+/**
  * Selects whole rows of a view, wherever they stand in a tree.
  *
  * model_select_range addresses the top level of the model only, and a tree
@@ -3785,14 +3798,20 @@ QtJson::JsonObject Player::call_slot(const QtJson::JsonObject & command) {
         generic[i] = QGenericArgument(typeName, data);
     }
 
+    // A slot or signal that opens a modal window does not return until the
+    // window is closed, and the caller waits for the answer all that time.
+    // Queued, it runs from the event loop after the answer has gone.
+    const Qt::ConnectionType connection = command["queued"].toBool()
+                                              ? Qt::QueuedConnection
+                                              : Qt::DirectConnection;
     bool invokedMeth;
-    if (returnsVariant) {
+    if (returnsVariant && connection == Qt::DirectConnection) {
         invokedMeth = chosen.invoke(
-            ctx.obj, Qt::DirectConnection,
+            ctx.obj, connection,
             QGenericReturnArgument("QVariant", &result_slot), generic[0],
             generic[1], generic[2], generic[3]);
     } else {
-        invokedMeth = chosen.invoke(ctx.obj, Qt::DirectConnection, generic[0],
+        invokedMeth = chosen.invoke(ctx.obj, connection, generic[0],
                                     generic[1], generic[2], generic[3]);
     }
     if (!invokedMeth) {

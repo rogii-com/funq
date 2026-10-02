@@ -104,6 +104,7 @@ public slots:
         const QtJson::JsonObject & command);
     QtJson::JsonObject model_select_items(
         const QtJson::JsonObject & command);
+    QtJson::JsonObject call_slot_queued(const QtJson::JsonObject & command);
     QtJson::JsonObject menu_actions(const QtJson::JsonObject & command);
     QtJson::JsonObject menu_trigger(const QtJson::JsonObject & command);
     QtJson::JsonObject object_property_object(

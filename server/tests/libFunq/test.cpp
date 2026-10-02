@@ -40,6 +40,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QGraphicsView>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
@@ -668,6 +669,29 @@ private slots:
         QVariant result_slot = player.call_slot(command)["result_slot"];
         QCOMPARE(result_slot, QVariant(123));
         QCOMPARE(testslot.m_variant, QVariant(23));
+    }
+
+    void test_player_call_slot_queued_runs_after_the_answer() {
+        QMainWindow mw;
+        QLabel * label = new QLabel("<a href=\"x\">link</a>");
+        mw.setCentralWidget(label);
+        QSignalSpy spy(label, SIGNAL(linkActivated(const QString &)));
+
+        QBuffer buffer;
+        Player player(&buffer);
+
+        QtJson::JsonObject commandPath;
+        commandPath["path"] = "QMainWindow::QLabel";
+        QtJson::JsonObject command;
+        command["oid"] = player.widget_by_path(commandPath)["oid"];
+        command["slot_name"] = "linkActivated";
+        command["params"] = QVariantList() << "x";
+
+        QVERIFY(!player.call_slot_queued(command).contains("errName"));
+        QCOMPARE(spy.count(), 0);
+        qApp->processEvents();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toString(), QString("x"));
     }
 
     void test_player_widget_keyclick() {
