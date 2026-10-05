@@ -1497,6 +1497,32 @@ QtJson::JsonObject Player::widget_click_at(const QtJson::JsonObject & command) {
 }
 
 /**
+ * Moves the pointer to a point of a widget through the platform, no button held.
+ *
+ * Hover effects and tooltips wait for the pointer to rest, so the caller waits
+ * after the answer as long as the effect needs. x and y are relative to the
+ * widget; without them the pointer goes to its center.
+ */
+QtJson::JsonObject Player::widget_hover(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QWidget * widget = ctx.widget;
+    const QPoint pos = command.contains("x")
+        ? QPoint(command["x"].toInt(), command["y"].toInt())
+        : widget->rect().center();
+    if (!queue_platform_mouse(widget, pos, Qt::NoButton, Qt::NoButton,
+                              QEvent::MouseMove, gStampOnDelivery,
+                              modifiers_of(command))) {
+        return createError("NoPlatformWindow",
+                           "The widget has no window to take a platform hover");
+    }
+    QtJson::JsonObject result;
+    return result;
+}
+
+/**
  * Drags the mouse inside a widget: moves to the first point, presses, walks
  * the points in steps with the button held, releases at the last one.
  *

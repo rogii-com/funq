@@ -87,6 +87,7 @@ public slots:
     QtJson::JsonObject widget_click(const QtJson::JsonObject & command);
     QtJson::JsonObject widget_drag(const QtJson::JsonObject & command);
     QtJson::JsonObject widget_click_at(const QtJson::JsonObject & command);
+    QtJson::JsonObject widget_hover(const QtJson::JsonObject & command);
     QtJson::JsonObject widget_move(const QtJson::JsonObject & command);
     QtJson::JsonObject widget_resize(const QtJson::JsonObject & command);
     QtJson::JsonObject widget_close(const QtJson::JsonObject & command);

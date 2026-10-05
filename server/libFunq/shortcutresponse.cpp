@@ -36,6 +36,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 
 #include "player.h"
 
+#include <QAction>
 #include <QApplication>
 #include <QKeyEvent>
 #include <QThread>
@@ -56,6 +57,27 @@ static void send_keys(QWidget * target, const QKeySequence & binding,
             QTest::keyRelease(target, static_cast<Qt::Key>(key), modifiers);
         }
     }
+}
+
+/**
+ * Triggers the action of a window that owns the key sequence.
+ *
+ * A window shortcut fires only while its window is the active one, and a
+ * desktop nobody sits at never activates a window. The action is what the
+ * shortcut would have run, so it is run directly. Returns whether one was found.
+ */
+static bool trigger_window_action(QWidget * target, const QKeySequence & binding) {
+    QWidget * window = target->window();
+    if (!window || QApplication::activeWindow() == window) {
+        return false;
+    }
+    foreach (QAction * action, window->findChildren<QAction *>()) {
+        if (action->isEnabled() && action->shortcuts().contains(binding)) {
+            action->trigger();
+            return true;
+        }
+    }
+    return false;
 }
 
 ShortcutResponse::ShortcutResponse(JsonClient * client,
@@ -111,6 +133,10 @@ void ShortcutResponse::execute(int call) {
         QMetaObject::invokeMethod(
             m_target,
             [target, delivered, binding]() {
+                if (trigger_window_action(target, binding)) {
+                    *delivered = true;
+                    return;
+                }
                 target->grabKeyboard();
                 send_keys(target, binding, true);
                 if (target) {

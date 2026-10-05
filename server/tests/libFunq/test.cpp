@@ -2080,6 +2080,52 @@ private slots:
                  QString("InvalidClicks"));
     }
 
+    void test_player_widget_hover_moves_the_pointer_without_a_button() {
+        QMainWindow mw;
+        DragRecorderWidget * target = new DragRecorderWidget;
+        target->setMouseTracking(true);
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["x"] = 60;
+        command["y"] = 45;
+        QVERIFY(!player.widget_hover(command).contains("errName"));
+
+        QTRY_VERIFY(target->moved.contains(QPoint(60, 45)));
+        QCOMPARE(target->buttonsOnMove, Qt::MouseButtons());
+        QVERIFY(target->pressed.isEmpty());
+    }
+
+    void test_player_shortcut_triggers_the_action_of_an_inactive_window() {
+        QMainWindow mw;
+        QAction * action = new QAction("Run", &mw);
+        action->setShortcut(QKeySequence("Ctrl+Shift+F1"));
+        mw.addAction(action);
+        QSignalSpy spy(action, SIGNAL(triggered(bool)));
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+        QMainWindow other;
+        other.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&other));
+        other.activateWindow();
+        QTRY_VERIFY(QApplication::activeWindow() == &other);
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(&mw);
+        command["keysequence"] = "Ctrl+Shift+F1";
+        DelayedResponse * response = player.shortcut(command);
+        response->start();
+        QTRY_COMPARE_WITH_TIMEOUT(spy.count(), 1, 5000);
+    }
+
     void test_player_widget_drag_needs_two_points() {
         QMainWindow mw;
         QWidget * target = new QWidget;
