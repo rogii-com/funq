@@ -47,6 +47,7 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #include <QMenu>
 #include <QMimeData>
 #include <QObject>
+#include <QPointer>
 #include <QPushButton>
 #include <QShortcut>
 #include <QElapsedTimer>
@@ -67,6 +68,10 @@ knowledge of the CeCILL v2.1 license and that you accept its terms.
 #ifdef QT_QUICK_LIB
 #include <QQuickItem>
 #include <QQuickView>
+#endif
+
+#ifdef QT_QUICKWIDGETS_LIB
+#include <QQuickWidget>
 #endif
 
 #include "funq.h"
@@ -148,6 +153,218 @@ struct DropRecorder : public QObject {
         default:
             return QObject::eventFilter(watched, event);
         }
+    }
+};
+
+static const char kRowsFormat[] = "application/x-funq-test-rows";
+
+/**
+ * Lets the drop a command queued arrive. QApplication hands a drop to the widget
+ * that took the last enter, so a test that sends a second drop must not leave the
+ * first one in the queue.
+ */
+static void let_drop_arrive() {
+    QCoreApplication::processEvents();
+}
+
+static QPoint drop_pos(const QDropEvent * event) {
+#if QT_VERSION_MAJOR >= 6
+    return event->position().toPoint();
+#else
+    return event->pos();
+#endif
+}
+
+/**
+ * The rows of a model as a drag of them takes them: the texts of the rows in a
+ * format of the model's own. The model remembers which indexes it was asked for
+ * and the mime data it handed out, to tell whether the data is deleted.
+ */
+class DraggableRowsModel : public QStandardItemModel {
+public:
+    Qt::DropActions dragActions = Qt::CopyAction | Qt::MoveAction;
+    bool refusesMimeData = false;
+    mutable QModelIndexList mimeIndexes;
+    mutable QPointer<QMimeData> lastMime;
+
+    Qt::DropActions supportedDragActions() const override {
+        return dragActions;
+    }
+
+    QStringList mimeTypes() const override {
+        return QStringList() << kRowsFormat;
+    }
+
+    QMimeData * mimeData(const QModelIndexList & indexes) const override {
+        mimeIndexes = indexes;
+        if (refusesMimeData) {
+            return NULL;
+        }
+        QStringList texts;
+        foreach (const QModelIndex & index, indexes) {
+            texts << data(index).toString();
+        }
+        QMimeData * mime = new QMimeData();
+        mime->setData(kRowsFormat, texts.join('\n').toUtf8());
+        lastMime = mime;
+        return mime;
+    }
+};
+
+/**
+ * Takes dropped rows the way a drop target of the application does, and writes
+ * down what each drag event brought.
+ *
+ * takes and takesMoves make it refuse the enter or the moves. It accepts with
+ * acceptProposedAction(), which gives the action Qt proposes; keepsAction makes
+ * it accept with accept(), which leaves the action the event came with.
+ */
+struct RowsDropLog {
+    bool takes = true;
+    bool takesMoves = true;
+    bool keepsAction = false;
+    int enters = 0;
+    int moves = 0;
+    int leaves = 0;
+    int drops = 0;
+    QPoint enterPos;
+    QPoint dropPos;
+    QStringList droppedRows;
+    QStringList droppedFormats;
+    Qt::DropAction enterAction = Qt::IgnoreAction;
+    Qt::DropAction droppedAction = Qt::IgnoreAction;
+
+    void onEnter(QDragEnterEvent * event) {
+        ++enters;
+        enterPos = drop_pos(event);
+        enterAction = event->dropAction();
+        decide(event, takes && event->mimeData()->hasFormat(kRowsFormat));
+    }
+
+    void onMove(QDragMoveEvent * event) {
+        ++moves;
+        decide(event, takesMoves);
+    }
+
+    void onLeave() {
+        ++leaves;
+    }
+
+    void onDrop(QDropEvent * event) {
+        ++drops;
+        dropPos = drop_pos(event);
+        droppedAction = event->dropAction();
+        droppedFormats = event->mimeData()->formats();
+        droppedRows = QString::fromUtf8(event->mimeData()->data(kRowsFormat))
+                          .split('\n');
+        decide(event, true);
+    }
+
+private:
+    void decide(QDropEvent * event, bool take) {
+        if (!take) {
+            event->ignore();
+        } else if (keepsAction) {
+            event->accept();
+        } else {
+            event->acceptProposedAction();
+        }
+    }
+};
+
+class RowsDropTarget : public QWidget, public RowsDropLog {
+    Q_OBJECT
+public:
+    explicit RowsDropTarget(QWidget * parent = NULL) : QWidget(parent) {
+        setAcceptDrops(true);
+    }
+
+protected:
+    void dragEnterEvent(QDragEnterEvent * event) override { onEnter(event); }
+    void dragMoveEvent(QDragMoveEvent * event) override { onMove(event); }
+    void dragLeaveEvent(QDragLeaveEvent *) override { onLeave(); }
+    void dropEvent(QDropEvent * event) override { onDrop(event); }
+};
+
+/**
+ * The same, for a widget the application takes drops on through an event filter,
+ * as an item view takes them on its viewport.
+ */
+class RowsDropFilter : public QObject, public RowsDropLog {
+public:
+    bool eventFilter(QObject * watched, QEvent * event) override {
+        switch (event->type()) {
+        case QEvent::DragEnter:
+            onEnter(static_cast<QDragEnterEvent *>(event));
+            return true;
+        case QEvent::DragMove:
+            onMove(static_cast<QDragMoveEvent *>(event));
+            return true;
+        case QEvent::DragLeave:
+            onLeave();
+            return true;
+        case QEvent::Drop:
+            onDrop(static_cast<QDropEvent *>(event));
+            return true;
+        default:
+            return QObject::eventFilter(watched, event);
+        }
+    }
+};
+
+/**
+ * A tree of rows and a widget to drop them on, in one window the commands find by
+ * path: Grids with three rows under it, each of two columns.
+ */
+struct DropScene {
+    QWidget host;
+    QTreeView tree;
+    RowsDropTarget target;
+    DraggableRowsModel model;
+    QBuffer buffer;
+    Player player;
+
+    DropScene() : tree(&host), target(&host), player(&buffer) {
+        host.setObjectName("host");
+        tree.setObjectName("source");
+        target.setObjectName("target");
+        model.setColumnCount(2);
+        QStandardItem * grids = new QStandardItem("Grids");
+        for (int i = 0; i < 3; ++i) {
+            grids->appendRow(QList<QStandardItem *>()
+                             << new QStandardItem(QString("Grid%1").arg(i))
+                             << new QStandardItem(QString("extra%1").arg(i)));
+        }
+        model.appendRow(grids);
+        tree.setModel(&model);
+        tree.expandAll();
+    }
+
+    qulonglong oid_of(const QString & path) {
+        QtJson::JsonObject command;
+        command["path"] = path;
+        return player.widget_by_path(command)["oid"].toULongLong();
+    }
+
+    QModelIndex grids() const {
+        return model.index(0, 0);
+    }
+
+    static QVariantMap grid(int row, int column = 0) {
+        QVariantMap item;
+        item["itempath"] = "0-0";
+        item["row"] = row;
+        item["column"] = column;
+        return item;
+    }
+
+    QtJson::JsonObject drop_command(const QVariantList & items,
+                                    const QString & targetPath = "host::target") {
+        QtJson::JsonObject command;
+        command["oid"] = oid_of("host::source");
+        command["target_oid"] = oid_of(targetPath);
+        command["items"] = items;
+        return command;
     }
 };
 
@@ -2248,6 +2465,325 @@ private slots:
         QVERIFY(!player.drop_files(command)["accepted"].toBool());
     }
 
+    void test_player_drop_model_items_delivers_the_rows_after_the_answer() {
+        DropScene scene;
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(1)));
+
+        QVERIFY(!answer.contains("errName"));
+        QVERIFY(answer["accepted"].toBool());
+        QCOMPARE(answer["count"].toInt(), 1);
+        QCOMPARE(answer["target_class"].toString(), QString("RowsDropTarget"));
+        QVERIFY(answer["formats"].toStringList().contains(kRowsFormat));
+        QCOMPARE(scene.target.enters, 1);
+        QCOMPARE(scene.target.moves, 1);
+        QCOMPARE(scene.target.enterPos, scene.target.rect().center());
+        // the drop is queued like a click: the command returns before it arrives
+        QCOMPARE(scene.target.drops, 0);
+        QVERIFY(!scene.model.lastMime.isNull());
+        QTRY_COMPARE(scene.target.drops, 1);
+        QCOMPARE(scene.target.droppedRows, QStringList() << "Grid1");
+        QCOMPARE(scene.target.droppedFormats, QStringList() << kRowsFormat);
+        QCOMPARE(scene.target.dropPos, scene.target.rect().center());
+        QVERIFY(scene.model.lastMime.isNull());
+    }
+
+    void test_player_drop_model_items_selects_the_rows_unless_told_not_to() {
+        DropScene scene;
+        QItemSelectionModel * selection = scene.tree.selectionModel();
+        selection->select(scene.model.index(2, 0, scene.grids()),
+                          QItemSelectionModel::Select | QItemSelectionModel::Rows);
+
+        QtJson::JsonObject command =
+            scene.drop_command(QVariantList() << DropScene::grid(0));
+        command["select"] = false;
+        QVERIFY(scene.player.drop_model_items(command)["accepted"].toBool());
+        QCOMPARE(selection->selectedRows().size(), 1);
+        QCOMPARE(selection->selectedRows().first().row(), 2);
+        let_drop_arrive();
+
+        command.remove("select");
+        QVERIFY(scene.player.drop_model_items(command)["accepted"].toBool());
+        QCOMPARE(selection->selectedRows().size(), 1);
+        QCOMPARE(selection->selectedRows().first().row(), 0);
+        QCOMPARE(selection->currentIndex().row(), 0);
+        QTRY_COMPARE(scene.target.drops, 2);
+    }
+
+    void test_player_drop_model_items_drops_one_index_per_row() {
+        DropScene scene;
+        scene.model.itemFromIndex(scene.model.index(1, 0, scene.grids()))
+            ->setDragEnabled(false);
+
+        // row 2 by its second column, row 0 twice, and a row that cannot be dragged
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList()
+                               << DropScene::grid(0) << DropScene::grid(2, 1)
+                               << DropScene::grid(0, 1) << DropScene::grid(1)));
+
+        QVERIFY(answer["accepted"].toBool());
+        QCOMPARE(answer["count"].toInt(), 2);
+        QCOMPARE(scene.model.mimeIndexes.size(), 2);
+        QCOMPARE(scene.model.mimeIndexes.at(0),
+                 scene.model.index(0, 0, scene.grids()));
+        QCOMPARE(scene.model.mimeIndexes.at(1),
+                 scene.model.index(2, 0, scene.grids()));
+        // the rows that were asked for are selected, the draggable ones or not
+        QCOMPARE(scene.tree.selectionModel()->selectedRows().size(), 3);
+        QTRY_COMPARE(scene.target.droppedRows,
+                     QStringList() << "Grid0" << "Grid2");
+    }
+
+    void test_player_drop_model_items_refuses_rows_that_cannot_be_dragged() {
+        DropScene scene;
+        scene.model.itemFromIndex(scene.model.index(0, 0, scene.grids()))
+            ->setDragEnabled(false);
+        QItemSelectionModel * selection = scene.tree.selectionModel();
+        selection->select(scene.model.index(2, 0, scene.grids()),
+                          QItemSelectionModel::Select | QItemSelectionModel::Rows);
+
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(0)));
+
+        QCOMPARE(answer["errName"].toString(), QString("NotDraggable"));
+        QVERIFY(scene.model.mimeIndexes.isEmpty());
+        QCOMPARE(scene.target.enters, 0);
+        QCOMPARE(selection->selectedRows().size(), 1);
+        QCOMPARE(selection->selectedRows().first().row(), 2);
+    }
+
+    void test_player_drop_model_items_reports_a_refused_enter_without_an_error() {
+        DropScene scene;
+        scene.target.takes = false;
+
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(0)));
+
+        QVERIFY(!answer.contains("errName"));
+        QVERIFY(!answer["accepted"].toBool());
+        QCOMPARE(answer["action"].toString(), QString("ignore"));
+        QCOMPARE(scene.target.enters, 1);
+        QCOMPARE(scene.target.moves, 0);
+        QCOMPARE(scene.target.leaves, 1);
+        // nobody is left to delete the data of a drop that is not coming
+        QVERIFY(scene.model.lastMime.isNull());
+        QTest::qWait(50);
+        QCOMPARE(scene.target.drops, 0);
+    }
+
+    void test_player_drop_model_items_reports_refused_moves() {
+        DropScene scene;
+        scene.target.takesMoves = false;
+
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(0)));
+
+        QVERIFY(!answer.contains("errName"));
+        QVERIFY(!answer["accepted"].toBool());
+        QCOMPARE(scene.target.enters, 1);
+        QCOMPARE(scene.target.moves, 1);
+        QCOMPARE(scene.target.leaves, 1);
+        QVERIFY(scene.model.lastMime.isNull());
+        QTest::qWait(50);
+        QCOMPARE(scene.target.drops, 0);
+    }
+
+    void test_player_drop_model_items_sends_the_requested_number_of_moves() {
+        DropScene scene;
+        QtJson::JsonObject command =
+            scene.drop_command(QVariantList() << DropScene::grid(0));
+
+        command["moves"] = 3;
+        QVERIFY(scene.player.drop_model_items(command)["accepted"].toBool());
+        QCOMPARE(scene.target.moves, 3);
+        let_drop_arrive();
+
+        command["moves"] = 0;
+        QVERIFY(scene.player.drop_model_items(command)["accepted"].toBool());
+        QCOMPARE(scene.target.moves, 3);
+        QTRY_COMPARE(scene.target.drops, 2);
+
+        command["moves"] = -1;
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("InvalidMoves"));
+    }
+
+    void test_player_drop_model_items_goes_to_the_nearest_widget_that_accepts_drops() {
+        DropScene scene;
+        scene.target.setGeometry(0, 0, 200, 100);
+        QWidget inner(&scene.target);
+        inner.setObjectName("inner");
+        inner.setGeometry(30, 20, 50, 40);
+
+        QtJson::JsonObject command = scene.drop_command(
+            QVariantList() << DropScene::grid(0), "host::target::inner");
+        command["x"] = 5;
+        command["y"] = 7;
+        QtJson::JsonObject answer = scene.player.drop_model_items(command);
+
+        QVERIFY(answer["accepted"].toBool());
+        QCOMPARE(answer["target_class"].toString(), QString("RowsDropTarget"));
+        QCOMPARE(scene.target.enterPos, QPoint(35, 27));
+        QTRY_COMPARE(scene.target.drops, 1);
+        QCOMPARE(scene.target.dropPos, QPoint(35, 27));
+
+        command.remove("x");
+        command.remove("y");
+        QVERIFY(scene.player.drop_model_items(command)["accepted"].toBool());
+        QCOMPARE(scene.target.enterPos, QPoint(30, 20) + inner.rect().center());
+        QTRY_COMPARE(scene.target.drops, 2);
+    }
+
+    void test_player_drop_model_items_reports_a_target_that_accepts_no_drops() {
+        DropScene scene;
+        QWidget plain(&scene.host);
+        plain.setObjectName("plain");
+
+        QtJson::JsonObject command = scene.drop_command(
+            QVariantList() << DropScene::grid(0), "host::plain");
+        QtJson::JsonObject answer = scene.player.drop_model_items(command);
+        QVERIFY(!answer.contains("errName"));
+        QVERIFY(!answer["accepted"].toBool());
+        QCOMPARE(answer["target_class"].toString(), QString("QWidget"));
+        QCOMPARE(answer["count"].toInt(), 1);
+        QVERIFY(scene.model.lastMime.isNull());
+
+        // a disabled widget takes no drag either, though it accepts drops
+        scene.target.setEnabled(false);
+        answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(0)));
+        QVERIFY(!answer["accepted"].toBool());
+        QCOMPARE(scene.target.enters, 0);
+    }
+
+    void test_player_drop_model_items_drops_on_the_viewport_of_a_scroll_area() {
+        DropScene scene;
+        QListWidget list(&scene.host);
+        list.setObjectName("list");
+        list.setFrameStyle(QFrame::Box | QFrame::Plain);
+        list.setLineWidth(6);
+        list.setGeometry(0, 120, 200, 150);
+        RowsDropFilter filter;
+        list.viewport()->setAcceptDrops(true);
+        list.viewport()->installEventFilter(&filter);
+        scene.host.resize(300, 300);
+        scene.host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene.host));
+        QVERIFY(list.viewport()->pos() != QPoint(0, 0));
+
+        QtJson::JsonObject command = scene.drop_command(
+            QVariantList() << DropScene::grid(0), "host::list");
+        command["x"] = 20;
+        command["y"] = 30;
+        const QtJson::JsonObject answer = scene.player.drop_model_items(command);
+
+        QVERIFY(answer["accepted"].toBool());
+        QCOMPARE(answer["target_class"].toString(), QString("QWidget"));
+        QCOMPARE(filter.enterPos,
+                 list.viewport()->mapFrom(&list, QPoint(20, 30)));
+        QTRY_COMPARE(filter.droppedRows, QStringList() << "Grid0");
+
+        command.remove("x");
+        command.remove("y");
+        QVERIFY(scene.player.drop_model_items(command)["accepted"].toBool());
+        QCOMPARE(filter.enterPos, list.viewport()->rect().center());
+        QTRY_COMPARE(filter.drops, 2);
+    }
+
+    void test_player_drop_model_items_proposes_the_action_the_view_would() {
+        DropScene scene;
+        scene.target.keepsAction = true;
+        QtJson::JsonObject command =
+            scene.drop_command(QVariantList() << DropScene::grid(0));
+        const auto action_of = [&scene, &command]() {
+            const QString action =
+                scene.player.drop_model_items(command)["action"].toString();
+            let_drop_arrive();
+            return action;
+        };
+
+        // a view that sets no default action drags with copy
+        QCOMPARE(action_of(), QString("copy"));
+        QCOMPARE(scene.target.enterAction, Qt::CopyAction);
+
+        scene.tree.setDefaultDropAction(Qt::MoveAction);
+        QCOMPARE(action_of(), QString("move"));
+
+        // a default action the drag does not allow is not used
+        scene.tree.setDefaultDropAction(Qt::LinkAction);
+        QCOMPARE(action_of(), QString("copy"));
+
+        // a view that only moves its rows inside itself falls back to move
+        scene.tree.setDefaultDropAction(Qt::IgnoreAction);
+        scene.tree.setDragDropMode(QAbstractItemView::InternalMove);
+        QCOMPARE(action_of(), QString("move"));
+
+        command["actions"] = QVariantList() << "link";
+        QCOMPARE(action_of(), QString("link"));
+        QCOMPARE(scene.target.drops, 5);
+    }
+
+    void test_player_drop_model_items_takes_the_actions_from_the_command() {
+        DropScene scene;
+        scene.target.keepsAction = true;
+        QtJson::JsonObject command =
+            scene.drop_command(QVariantList() << DropScene::grid(0));
+
+        command["actions"] = QVariantList() << "copy" << "link";
+        command["proposed"] = "link";
+        QCOMPARE(scene.player.drop_model_items(command)["action"].toString(),
+                 QString("link"));
+        QCOMPARE(scene.target.enterAction, Qt::LinkAction);
+
+        command["proposed"] = "move";
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("InvalidDropAction"));
+
+        command["proposed"] = "teleport";
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("InvalidDropAction"));
+
+        command.remove("proposed");
+        command["actions"] = QVariantList() << "teleport";
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("InvalidDropAction"));
+        QTRY_COMPARE(scene.target.drops, 1);
+    }
+
+    void test_player_drop_model_items_carries_the_modifiers_into_the_events() {
+        DropScene scene;
+        QtJson::JsonObject command =
+            scene.drop_command(QVariantList() << DropScene::grid(0));
+
+        // Qt proposes copy for a plain drag and move for one with Shift held
+        QCOMPARE(scene.player.drop_model_items(command)["action"].toString(),
+                 QString("copy"));
+        let_drop_arrive();
+        command["modifiers"] = QVariantList() << "shift";
+        QCOMPARE(scene.player.drop_model_items(command)["action"].toString(),
+                 QString("move"));
+        QTRY_COMPARE(scene.target.drops, 2);
+        QCOMPARE(scene.target.droppedAction, Qt::MoveAction);
+    }
+
+    void test_player_drop_model_items_rejects_bad_requests() {
+        DropScene scene;
+        QtJson::JsonObject command =
+            scene.drop_command(QVariantList() << DropScene::grid(7));
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("MissingModelItem"));
+
+        command["items"] = QVariantList();
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("MissingModelItem"));
+
+        scene.model.refusesMimeData = true;
+        command["items"] = QVariantList() << DropScene::grid(0);
+        QCOMPARE(scene.player.drop_model_items(command)["errName"].toString(),
+                 QString("NoMimeData"));
+        QCOMPARE(scene.target.enters, 0);
+    }
+
 #ifdef QT_QUICK_LIB
     /* QtQuick tests */
 
@@ -2363,6 +2899,53 @@ private slots:
         const QtJson::JsonObject listed = player.widgets_list(list);
         QCOMPARE(QStringList(listed.keys()),
                  QStringList() << "first" << "second");
+    }
+
+#ifdef QT_QUICKWIDGETS_LIB
+    void test_player_drop_model_items_drops_on_a_quick_widget() {
+        DropScene scene;
+        QQuickWidget quick(&scene.host);
+        quick.setObjectName("quick");
+        quick.setSource(QUrl::fromLocalFile(SOURCE_DIR "drop_area.qml"));
+        quick.setGeometry(0, 120, 200, 200);
+        scene.host.resize(300, 400);
+        scene.host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene.host));
+        QCOMPARE(quick.status(), QQuickWidget::Ready);
+
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(1),
+                               "host::quick"));
+
+        QVERIFY(!answer.contains("errName"));
+        QVERIFY(answer["accepted"].toBool());
+        QCOMPARE(answer["target_class"].toString(), QString("QQuickWidget"));
+        QTRY_COMPARE(quick.rootObject()->property("dropCount").toInt(), 1);
+        QCOMPARE(quick.rootObject()->property("entered").toInt(), 1);
+        QCOMPARE(quick.rootObject()->property("droppedText").toString(),
+                 QString("Grid1"));
+    }
+#endif
+
+    void test_player_drop_model_items_reports_a_quick_widget_without_a_drop_area() {
+        DropScene scene;
+        QQuickWidget quick(&scene.host);
+        quick.setObjectName("quick");
+        quick.setSource(QUrl::fromLocalFile(SOURCE_DIR "sample1.qml"));
+        quick.setGeometry(0, 120, 200, 200);
+        scene.host.resize(300, 400);
+        scene.host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&scene.host));
+        QCOMPARE(quick.status(), QQuickWidget::Ready);
+
+        const QtJson::JsonObject answer = scene.player.drop_model_items(
+            scene.drop_command(QVariantList() << DropScene::grid(1),
+                               "host::quick"));
+
+        QVERIFY(!answer.contains("errName"));
+        QVERIFY(!answer["accepted"].toBool());
+        QCOMPARE(answer["target_class"].toString(), QString("QQuickWidget"));
+        QVERIFY(scene.model.lastMime.isNull());
     }
 
 #if QT_VERSION_MAJOR < 6

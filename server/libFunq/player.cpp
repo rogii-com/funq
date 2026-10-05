@@ -3766,6 +3766,275 @@ QtJson::JsonObject Player::drop_files(const QtJson::JsonObject & command) {
 }
 
 /**
+ * Reads the name of a drop action: copy, move or link.
+ */
+static bool drop_action_of(const QString & name, Qt::DropAction & action) {
+    const QString text = name.toLower();
+    if (text == "copy") {
+        action = Qt::CopyAction;
+    } else if (text == "move") {
+        action = Qt::MoveAction;
+    } else if (text == "link") {
+        action = Qt::LinkAction;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * The action a drag of a view proposes, chosen the way QAbstractItemView::startDrag
+ * does it: the default action of the view when the drag allows it, otherwise copy,
+ * unless the view only moves its rows inside itself. When neither applies,
+ * QDrag::exec settles for move, copy or link, in this order, and so does this.
+ */
+static Qt::DropAction proposed_drop_action_of(QAbstractItemView * view,
+                                              Qt::DropActions actions) {
+    const Qt::DropAction wanted = view->defaultDropAction();
+    if (wanted != Qt::IgnoreAction && (actions & wanted)) {
+        return wanted;
+    }
+    if ((actions & Qt::CopyAction)
+        && view->dragDropMode() != QAbstractItemView::InternalMove) {
+        return Qt::CopyAction;
+    }
+    if (actions & Qt::MoveAction) {
+        return Qt::MoveAction;
+    }
+    if (actions & Qt::CopyAction) {
+        return Qt::CopyAction;
+    }
+    if (actions & Qt::LinkAction) {
+        return Qt::LinkAction;
+    }
+    return Qt::IgnoreAction;
+}
+
+/**
+ * Drops rows of an item view on a widget, the way a drag of those rows from the
+ * view arrives - without the drag.
+ *
+ * A real drag of a row runs QDrag::exec(), a nested event loop of the platform, and
+ * the command would never be answered: the client gives up in 10 seconds and its
+ * socket is dead. So the mime data is built as the view builds it for a drag
+ * (model->mimeData() of the dragged rows) and the drop events are sent to the
+ * target directly. The source view is not told how the drop ended: a move does not
+ * remove the rows from it, and QDropEvent::source() is empty.
+ *
+ * The rows are named as model_select_items names them; each row gives one index,
+ * of its first column, and only rows the model lets be dragged are dropped. With
+ * select (the default) the rows are selected first, as a click on them would.
+ * target_oid is the widget the pointer is over at x, y (the center when omitted),
+ * given in its coordinates. As Qt does it, the events go to the nearest widget at
+ * or above that one that is enabled and accepts drops - the viewport for a scroll
+ * area. actions are the allowed actions (the drag actions of the model by
+ * default), proposed is the action the drop starts with (as the view proposes it
+ * by default; Qt itself derives what acceptProposedAction() gives from the actions
+ * and the modifiers). moves is the number of move events sent before the drop.
+ *
+ * Enter and moves are sent at once to learn whether the target takes the rows:
+ * accepted is how the last move ended. A QQuickWidget hands the events to its
+ * scene and the answer is the scene's: without a DropArea under the point it
+ * refuses (Qt 6.11), but a scene that takes the move may still do nothing on the
+ * drop, so what a drop did in a QML scene is checked in the scene by a method,
+ * not by accepted. The drop is queued like a click's: a target that opens a
+ * dialog with exec() on a drop must not hold the command. A refused drop is an
+ * answer, not an error. QApplication hands a drop to the widget that took the
+ * last enter and forgets that widget after one drop, so a second drop sent before
+ * the first has arrived is lost: the caller waits for the effect of a drop before
+ * it sends another.
+ */
+QtJson::JsonObject Player::drop_model_items(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QAbstractItemView> source(this, command, "oid");
+    if (source.hasError()) {
+        return source.lastError;
+    }
+    WidgetLocatorContext<QWidget> destination(this, command, "target_oid");
+    if (destination.hasError()) {
+        return destination.lastError;
+    }
+    QAbstractItemView * view = source.widget;
+    QAbstractItemModel * model = view->model();
+    QItemSelectionModel * selection = view->selectionModel();
+    const bool select =
+        command.contains("select") ? command["select"].toBool() : true;
+    if (!model || (select && !selection)) {
+        return createError(
+            "MissingModel",
+            QString::fromUtf8("The view (id:%1) has no model to drag from")
+                .arg(source.id));
+    }
+    const QVariantList items = command["items"].toList();
+    if (items.isEmpty()) {
+        return createError("MissingModelItem",
+                           QString::fromUtf8("No items to drop"));
+    }
+
+    Qt::DropActions actions = model->supportedDragActions();
+    if (command.contains("actions")) {
+        actions = Qt::IgnoreAction;
+        foreach (const QVariant & name, command["actions"].toList()) {
+            Qt::DropAction action = Qt::IgnoreAction;
+            if (!drop_action_of(name.toString(), action)) {
+                return createError(
+                    "InvalidDropAction",
+                    QString::fromUtf8("Unknown drop action `%1`")
+                        .arg(name.toString()));
+            }
+            actions |= action;
+        }
+    }
+    Qt::DropAction proposed = proposed_drop_action_of(view, actions);
+    if (command.contains("proposed")) {
+        if (!drop_action_of(command["proposed"].toString(), proposed)
+            || !(actions & proposed)) {
+            return createError(
+                "InvalidDropAction",
+                QString::fromUtf8("The proposed action `%1` is not one of "
+                                  "the allowed actions")
+                    .arg(command["proposed"].toString()));
+        }
+    }
+    const int moves = command.contains("moves") ? command["moves"].toInt() : 1;
+    if (moves < 0 || moves > 1000) {
+        return createError("InvalidMoves",
+                           "The number of moves is from 0 to 1000");
+    }
+
+    QModelIndexList rows;
+    QModelIndexList draggable;
+    QItemSelection chosen;
+    QModelIndex last;
+    foreach (const QVariant & entry, items) {
+        const QVariantMap item = entry.toMap();
+        const QString itempath = item["itempath"].toString();
+        const QModelIndex first = get_model_item(
+            model, itempath, item["row"].toInt(), item["column"].toInt());
+        if (!first.isValid()) {
+            return createError(
+                "MissingModelItem",
+                QString::fromUtf8("Unable to find an item identified by %1 "
+                                  "row %2")
+                    .arg(itempath)
+                    .arg(item["row"].toInt()));
+        }
+        last = first;
+        const QModelIndex parent = first.parent();
+        const QModelIndex row = model->index(first.row(), 0, parent);
+        if (rows.contains(row)) {
+            continue;
+        }
+        rows << row;
+        const int lastColumn = qMax(0, model->columnCount(parent) - 1);
+        chosen.select(row, model->index(first.row(), lastColumn, parent));
+        if (model->flags(row) & Qt::ItemIsDragEnabled) {
+            draggable << row;
+        }
+    }
+    if (draggable.isEmpty()) {
+        return createError(
+            "NotDraggable",
+            QString::fromUtf8("None of the %1 rows of the view (id:%2) can be "
+                              "dragged")
+                .arg(rows.size())
+                .arg(source.id));
+    }
+    if (select) {
+        selection->select(chosen, QItemSelectionModel::Select
+                                      | QItemSelectionModel::Rows
+                                      | QItemSelectionModel::Clear);
+        selection->setCurrentIndex(last, QItemSelectionModel::NoUpdate);
+    }
+
+    QMimeData * mime = model->mimeData(draggable);
+    if (!mime) {
+        return createError(
+            "NoMimeData",
+            QString::fromUtf8("The model of the view (id:%1) gave no data "
+                              "for its rows")
+                .arg(source.id));
+    }
+
+    QWidget * hit = destination.widget;
+    const bool explicitPos = command.contains("x");
+    QPoint pos = explicitPos
+        ? QPoint(command["x"].toInt(), command["y"].toInt()) : QPoint();
+    if (QAbstractScrollArea * area = qobject_cast<QAbstractScrollArea *>(hit)) {
+        if (explicitPos) {
+            pos = area->viewport()->mapFrom(hit, pos);
+        }
+        hit = area->viewport();
+    }
+    if (!explicitPos) {
+        pos = hit->rect().center();
+    }
+    // the widget Qt hands a drag to is the nearest one that is enabled and accepts
+    // drops; a widget that only overrides dragEnterEvent() never gets it
+    QWidget * receiver = hit;
+    while (receiver && !(receiver->isEnabled() && receiver->acceptDrops())) {
+        if (receiver->isWindow()) {
+            receiver = NULL;
+            break;
+        }
+        pos = receiver->mapToParent(pos);
+        receiver = receiver->parentWidget();
+    }
+
+    QtJson::JsonObject result;
+    result["count"] = draggable.size();
+    result["formats"] = mime->formats();
+    result["target_class"] = QString::fromLatin1(
+        (receiver ? receiver : hit)->metaObject()->className());
+    if (!receiver) {
+        result["accepted"] = false;
+        result["action"] = drop_action_name(Qt::IgnoreAction);
+        delete mime;
+        return result;
+    }
+
+    const Qt::KeyboardModifiers mods = modifiers_of(command);
+    QPointer<QWidget> guarded(receiver);
+    QDragEnterEvent enter(pos, actions, mime, Qt::LeftButton, mods);
+    enter.setDropAction(proposed);
+    QCoreApplication::sendEvent(receiver, &enter);
+    bool accepted = enter.isAccepted();
+    Qt::DropAction action = enter.dropAction();
+    // as Qt does it: a move after an accepted enter carries what the previous event
+    // ended with, already accepted
+    for (int i = 0; accepted && guarded && i < moves; ++i) {
+        QDragMoveEvent move(pos, actions, mime, Qt::LeftButton, mods);
+        move.setAccepted(accepted);
+        move.setDropAction(action);
+        QCoreApplication::sendEvent(receiver, &move);
+        accepted = move.isAccepted();
+        action = move.dropAction();
+    }
+    accepted = accepted && guarded;
+    result["accepted"] = accepted;
+    result["action"] = drop_action_name(accepted ? action : Qt::IgnoreAction);
+    if (!accepted) {
+        if (guarded) {
+            QDragLeaveEvent leave;
+            QCoreApplication::sendEvent(receiver, &leave);
+        }
+        delete mime;
+        return result;
+    }
+    // the application is the context, not the target: the queued drop must run even if
+    // the target is gone by then, otherwise the mime data would leak
+    QMetaObject::invokeMethod(QCoreApplication::instance(),
+                              [guarded, pos, actions, mime, action, mods]() {
+        if (guarded) {
+            QDropEvent drop(pos, actions, mime, Qt::LeftButton, mods);
+            drop.setDropAction(action);
+            QCoreApplication::sendEvent(guarded, &drop);
+        }
+        delete mime;
+    }, Qt::QueuedConnection);
+    return result;
+}
+
+/**
  * Reads the numbers of a geometry value out of what JSON can carry.
  *
  * A point, a size or a rectangle arrives either as a list of numbers or as a
