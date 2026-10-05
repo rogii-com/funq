@@ -195,7 +195,8 @@ static int double_click_stamp() {
  */
 static bool platform_mouse(QWidget * widget, const QPoint & pos,
                            Qt::MouseButton button, Qt::MouseButtons state,
-                           QEvent::Type type, int stamp = gStampOnDelivery) {
+                           QEvent::Type type, int stamp = gStampOnDelivery,
+                           Qt::KeyboardModifiers mods = Qt::NoModifier) {
     QWidget * top = widget->window();
     QWindow * handle = top ? top->windowHandle() : NULL;
     if (!handle) {
@@ -211,8 +212,8 @@ static bool platform_mouse(QWidget * widget, const QPoint & pos,
     }
     const QPointF inWindow = widget->mapTo(top, pos);
     const QPointF global = widget->mapToGlobal(pos);
-    qt_handleMouseEvent(handle, inWindow, global, state, button, type,
-                        Qt::NoModifier, stamp);
+    qt_handleMouseEvent(handle, inWindow, global, state, button, type, mods,
+                        stamp);
     return true;
 }
 
@@ -234,7 +235,8 @@ static bool platform_mouse(QWidget * widget, const QPoint & pos,
 static bool queue_platform_mouse(QWidget * widget, const QPoint & pos,
                                  Qt::MouseButton button,
                                  Qt::MouseButtons state, QEvent::Type type,
-                                 int stamp = gStampOnDelivery) {
+                                 int stamp = gStampOnDelivery,
+                                 Qt::KeyboardModifiers mods = Qt::NoModifier) {
     QWidget * top = widget->window();
     if (!top || !top->windowHandle()) {
         return false;
@@ -242,8 +244,8 @@ static bool queue_platform_mouse(QWidget * widget, const QPoint & pos,
     // the widget is the context: a widget gone by then takes the event with it
     QMetaObject::invokeMethod(
         widget,
-        [widget, pos, button, state, type, stamp]() {
-            platform_mouse(widget, pos, button, state, type, stamp);
+        [widget, pos, button, state, type, stamp, mods]() {
+            platform_mouse(widget, pos, button, state, type, stamp, mods);
         },
         Qt::QueuedConnection);
     return true;
@@ -1412,6 +1414,89 @@ QtJson::JsonObject Player::widget_click(const QtJson::JsonObject & command) {
 }
 
 /**
+ * Keyboard modifiers named by a command: "modifiers" is a list of shift, ctrl,
+ * alt and meta.
+ */
+static Qt::KeyboardModifiers modifiers_of(const QtJson::JsonObject & command) {
+    Qt::KeyboardModifiers mods = Qt::NoModifier;
+    foreach (const QVariant & name, command["modifiers"].toList()) {
+        const QString text = name.toString().toLower();
+        if (text == "shift") {
+            mods |= Qt::ShiftModifier;
+        } else if (text == "ctrl" || text == "control") {
+            mods |= Qt::ControlModifier;
+        } else if (text == "alt") {
+            mods |= Qt::AltModifier;
+        } else if (text == "meta") {
+            mods |= Qt::MetaModifier;
+        }
+    }
+    return mods;
+}
+
+/**
+ * Clicks a point of a widget through the platform: one click, or two within the
+ * double click interval, with optional keyboard modifiers held.
+ *
+ * x and y are relative to the widget; without them the click goes to its
+ * center, as widget_click does. The pointer moves in first, as it does for a
+ * person. The events are queued like a click's, so a press that opens a menu
+ * or a dialog does not hold the command, and the caller waits for the effect.
+ * The platform takes no ready double click (see mouse_dclick), so two clicks
+ * are stamped a millisecond apart.
+ */
+QtJson::JsonObject Player::widget_click_at(const QtJson::JsonObject & command) {
+    WidgetLocatorContext<QWidget> ctx(this, command, "oid");
+    if (ctx.hasError()) {
+        return ctx.lastError;
+    }
+    QWidget * widget = ctx.widget;
+    QWidget * top = widget->window();
+    if (!top || !top->windowHandle()) {
+        return createError("NoPlatformWindow",
+                           "The widget has no window to take a platform click");
+    }
+    Qt::MouseButton button = Qt::LeftButton;
+    const QString buttonName = command["button"].toString();
+    if (buttonName == "right") {
+        button = Qt::RightButton;
+    } else if (buttonName == "middle") {
+        button = Qt::MiddleButton;
+    } else if (!buttonName.isEmpty() && buttonName != "left") {
+        return createError(
+            "InvalidButton",
+            QString::fromUtf8("Unknown mouse button `%1`").arg(buttonName));
+    }
+    const int clicks =
+        command.contains("clicks") ? command["clicks"].toInt() : 1;
+    if (clicks < 1 || clicks > 2) {
+        return createError("InvalidClicks", "A click is single or double");
+    }
+    const QPoint pos = command.contains("x")
+        ? QPoint(command["x"].toInt(), command["y"].toInt())
+        : widget->rect().center();
+    const Qt::KeyboardModifiers mods = modifiers_of(command);
+
+    queue_platform_mouse(widget, pos, Qt::NoButton, Qt::NoButton,
+                         QEvent::MouseMove, gStampOnDelivery, mods);
+    int stamp = clicks == 2 ? double_click_stamp() : gStampOnDelivery;
+    for (int i = 0; i < clicks; ++i) {
+        queue_platform_mouse(widget, pos, button, button,
+                             QEvent::MouseButtonPress, stamp, mods);
+        if (stamp != gStampOnDelivery) {
+            stamp = stamp_after(stamp, 1);
+        }
+        queue_platform_mouse(widget, pos, button, Qt::NoButton,
+                             QEvent::MouseButtonRelease, stamp, mods);
+        if (stamp != gStampOnDelivery) {
+            stamp = stamp_after(stamp, 1);
+        }
+    }
+    QtJson::JsonObject result;
+    return result;
+}
+
+/**
  * Drags the mouse inside a widget: moves to the first point, presses, walks
  * the points in steps with the button held, releases at the last one.
  *
@@ -1470,28 +1555,31 @@ QtJson::JsonObject Player::widget_drag(const QtJson::JsonObject & command) {
         }
     }
 
+    const Qt::KeyboardModifiers mods = modifiers_of(command);
     int delay = 0;
     const QEvent::Type move = QEvent::MouseMove;
-    QTimer::singleShot(delay, widget, [widget, path, button, move]() {
-        platform_mouse(widget, path.first(), Qt::NoButton, Qt::NoButton, move);
+    QTimer::singleShot(delay, widget, [widget, path, button, move, mods]() {
+        platform_mouse(widget, path.first(), Qt::NoButton, Qt::NoButton, move,
+                       gStampOnDelivery, mods);
     });
     delay += interval;
-    QTimer::singleShot(delay, widget, [widget, path, button]() {
+    QTimer::singleShot(delay, widget, [widget, path, button, mods]() {
         platform_mouse(widget, path.first(), button, button,
-                       QEvent::MouseButtonPress);
+                       QEvent::MouseButtonPress, gStampOnDelivery, mods);
     });
     for (int i = 1; i < path.size(); ++i) {
         delay += interval;
         const QPoint at = path[i];
-        QTimer::singleShot(delay, widget, [widget, at, button, move]() {
-            platform_mouse(widget, at, Qt::NoButton, button, move);
+        QTimer::singleShot(delay, widget, [widget, at, button, move, mods]() {
+            platform_mouse(widget, at, Qt::NoButton, button, move,
+                           gStampOnDelivery, mods);
         });
     }
     delay += interval;
     const QPoint last = path.last();
-    QTimer::singleShot(delay, widget, [widget, last, button]() {
+    QTimer::singleShot(delay, widget, [widget, last, button, mods]() {
         platform_mouse(widget, last, button, Qt::NoButton,
-                       QEvent::MouseButtonRelease);
+                       QEvent::MouseButtonRelease, gStampOnDelivery, mods);
     });
 
     QtJson::JsonObject result;

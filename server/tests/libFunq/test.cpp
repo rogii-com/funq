@@ -227,6 +227,30 @@ protected:
     }
 };
 
+/**
+ * A widget writing down the clicks it gets: where, with which modifiers, and
+ * how many of them came as a double click.
+ */
+class ClickRecorderWidget : public QWidget {
+public:
+    QList<QPoint> pressed;
+    QList<Qt::KeyboardModifiers> modifiersOnPress;
+    QList<QEvent::Type> handled;
+
+protected:
+    void mousePressEvent(QMouseEvent * event) override {
+        pressed << event->pos();
+        modifiersOnPress << event->modifiers();
+        handled << QEvent::MouseButtonPress;
+    }
+    void mouseReleaseEvent(QMouseEvent *) override {
+        handled << QEvent::MouseButtonRelease;
+    }
+    void mouseDoubleClickEvent(QMouseEvent *) override {
+        handled << QEvent::MouseButtonDblClick;
+    }
+};
+
 class TestSlot : public QWidget {
     Q_OBJECT
 public:
@@ -1994,6 +2018,66 @@ private slots:
         QCOMPARE(target->moved.last(), QPoint(120, 30));
         QVERIFY(target->moved.contains(QPoint(80, 30)));
         QVERIFY(target->buttonsOnMove.testFlag(Qt::LeftButton));
+    }
+
+    void test_player_widget_click_at_clicks_the_point_with_modifiers() {
+        QMainWindow mw;
+        ClickRecorderWidget * target = new ClickRecorderWidget;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["x"] = 40;
+        command["y"] = 25;
+        command["modifiers"] = QVariantList() << "shift";
+        QVERIFY(!player.widget_click_at(command).contains("errName"));
+
+        QVERIFY(target->pressed.isEmpty());
+        QTRY_COMPARE(target->handled.count(), 2);
+        QCOMPARE(target->pressed, QList<QPoint>() << QPoint(40, 25));
+        QVERIFY(target->modifiersOnPress.first().testFlag(Qt::ShiftModifier));
+    }
+
+    void test_player_widget_click_at_double_click_arrives_as_one() {
+        QMainWindow mw;
+        ClickRecorderWidget * target = new ClickRecorderWidget;
+        mw.setCentralWidget(target);
+        mw.resize(300, 200);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["x"] = 10;
+        command["y"] = 10;
+        command["clicks"] = 2;
+        QVERIFY(!player.widget_click_at(command).contains("errName"));
+
+        QTRY_COMPARE(target->handled.count(), 4);
+        QCOMPARE(target->handled, handled_for_double_click());
+    }
+
+    void test_player_widget_click_at_rejects_three_clicks() {
+        QMainWindow mw;
+        QWidget * target = new QWidget;
+        mw.setCentralWidget(target);
+        mw.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&mw));
+
+        QBuffer buffer;
+        Player player(&buffer);
+        QtJson::JsonObject command;
+        command["oid"] = player.registerObject(target);
+        command["clicks"] = 3;
+        QCOMPARE(player.widget_click_at(command)["errName"].toString(),
+                 QString("InvalidClicks"));
     }
 
     void test_player_widget_drag_needs_two_points() {
